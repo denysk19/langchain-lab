@@ -1,0 +1,2 @@
+# LangChain RAG Lab package
+

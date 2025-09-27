@@ -1,0 +1,57 @@
+[tool.poetry]
+name = "ikb-langchain-lab"
+version = "0.1.0"
+description = "A minimal console-based RAG chatbot using LangChain, FAISS, and persistent thread memory"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+license = "MIT"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.11"
+langchain = "^0.3.0"
+langchain-community = "^0.3.0"
+langchain-openai = "^0.2.0"
+langchain-text-splitters = "^0.3.0"
+langgraph = "^0.2.0"
+faiss-cpu = "^1.8.0"
+python-dotenv = "^1.0.0"
+pydantic-settings = "^2.4.0"
+tqdm = "^4.66.0"
+# PDF processing libraries (multiple options for best compatibility)
+PyPDF2 = {version = "^3.0.0", optional = true}
+pypdf = {version = "^4.0.0", optional = true}
+pdfplumber = {version = "^0.11.0", optional = true}
+pymupdf = {version = "^1.23.0", optional = true}
+# Document processing
+docx2txt = {version = "^0.8", optional = true}
+python-docx = {version = "^1.1.0", optional = true}
+
+[tool.poetry.group.dev.dependencies]
+ruff = "~0.6"
+pytest = "~8.2"
+
+[tool.poetry.extras]
+# Recommended: Install the best PDF library for banking documents
+pdf-best = ["pymupdf", "pdfplumber"]  # Best for complex layouts like bank handbooks
+pdf-basic = ["pypdf"]                 # Lightweight option
+pdf-legacy = ["PyPDF2"]              # Legacy compatibility
+documents = ["pymupdf", "pdfplumber", "docx2txt"]  # Full document support
+all-pdf = ["PyPDF2", "pypdf", "pdfplumber", "pymupdf"]  # All PDF options
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]  # Line too long (handled by formatter)
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
