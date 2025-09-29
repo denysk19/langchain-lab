@@ -6,6 +6,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage, AIMessage
 from .state import RAGState
 from .utils import format_docs, extract_conversation_context
+from .prompt_manager import PromptManager
 
 logger = logging.getLogger(__name__)
 
@@ -13,9 +14,10 @@ logger = logging.getLogger(__name__)
 class RAGNodes:
     """Container for RAG workflow nodes."""
     
-    def __init__(self, llm, retriever):
+    def __init__(self, llm, retriever, prompt_manager: PromptManager = None):
         self.llm = llm
         self.retriever = retriever
+        self.prompt_manager = prompt_manager or PromptManager()
     
     def query_classifier_node(self, state: RAGState) -> Dict[str, Any]:
         """Classify if query needs document retrieval or can be answered directly."""
@@ -30,21 +32,11 @@ class RAGNodes:
         # Get conversation context
         context_text = extract_conversation_context(messages, max_messages=6)
         
-        # Classification prompt
-        system_message = """You are helping a company employee who has access to internal company documents. Classify if their question needs company document retrieval.
-
-RETRIEVE for:
-- Policies, benefits, procedures
-- Company-specific information
-- "How many...", "What dates...", "How do I..." work questions
-
-DIRECT for:
-- Math, general facts, greetings
-- Non-company topics
-
-Reply: "RETRIEVE" or "DIRECT" only."""
-        
-        human_message = f"Recent context:\n{context_text}\n\nCurrent question: {question}"
+        # Get prompts from configuration
+        system_message, human_message = self.prompt_manager.get_classification_prompts(
+            context=context_text, 
+            question=question
+        )
         
         full_prompt = f"System: {system_message}\n\nHuman: {human_message}"
         
@@ -96,9 +88,11 @@ Reply: "RETRIEVE" or "DIRECT" only."""
             logger.info("🔄 No conversation context available")
             logger.debug("=" * 70)
         else:
-            # Context-aware query rewriter
-            system_message = "You are helping a company employee access internal documents. Rewrite their question as a standalone query using context. Return only the rewritten query."
-            human_message = f"Recent conversation:\n{context_text}\n\nLatest question: {question}\n\nRewritten standalone query:"
+            # Get prompts from configuration
+            system_message, human_message = self.prompt_manager.get_rewrite_prompts(
+                context=context_text,
+                question=question
+            )
             
             full_prompt = f"System: {system_message}\n\nHuman: {human_message}"
             
@@ -176,31 +170,31 @@ Reply: "RETRIEVE" or "DIRECT" only."""
         if needs_retrieval and context:
             # Retrieval-based answer with context
             logger.info("🤖 Generating retrieval-based answer")
-            prompt_content = f"""You are an internal company assistant helping an employee. Answer their question using the company documents provided. Address them as "you" (not by name). Be helpful and conversational.
-
-Company information:
-{context}
-
-{f"Recent conversation: {conversation_context}" if conversation_context else ""}
-
-Employee question: {question}"""
+            system_message, human_message = self.prompt_manager.get_generation_prompts(
+                mode="retrieval_based",
+                context=context,
+                conversation_context=conversation_context,
+                question=question
+            )
         else:
             # Direct answer without retrieval
             logger.info("🤖 Generating direct answer (general knowledge)")
-            prompt_content = f"""You are an internal company assistant helping an employee with a general question. Answer naturally and helpfully. Address them as "you" (not by name).
-
-{f"Recent conversation: {conversation_context}" if conversation_context else ""}
-
-Employee question: {question}"""
+            system_message, human_message = self.prompt_manager.get_generation_prompts(
+                mode="direct_answer",
+                conversation_context=conversation_context,
+                question=question
+            )
         
-        logger.debug(f"Full prompt length: {len(prompt_content)} chars")
+        logger.debug(f"Full prompt length: {len(human_message)} chars")
         logger.debug("Full message being sent to vLLM:")
         logger.debug("-" * 50)
-        logger.debug(prompt_content)
+        logger.debug(f"System: {system_message}")
+        logger.debug(f"Human: {human_message}")
         logger.debug("-" * 50)
         
         answer_prompt = ChatPromptTemplate.from_messages([
-            ("human", prompt_content)
+            ("system", system_message),
+            ("human", human_message)
         ])
         
         answer = answer_prompt | self.llm | (lambda x: x.content)

@@ -4,6 +4,7 @@ import logging
 from langgraph.graph import StateGraph, END
 from .state import RAGState
 from .nodes import RAGNodes
+from .prompt_manager import PromptManager
 
 logger = logging.getLogger(__name__)
 
@@ -11,11 +12,12 @@ logger = logging.getLogger(__name__)
 class RAGWorkflow:
     """RAG workflow builder and manager."""
     
-    def __init__(self, llm, retriever, k: int = 2):
+    def __init__(self, llm, retriever, k: int = 2, prompt_manager: PromptManager = None):
         self.llm = llm
         self.retriever = retriever
         self.k = k
-        self.nodes = RAGNodes(llm, retriever)
+        self.prompt_manager = prompt_manager or PromptManager()
+        self.nodes = RAGNodes(llm, retriever, self.prompt_manager)
         self.graph = self._build_graph()
     
     def _build_graph(self):
@@ -41,7 +43,7 @@ class RAGWorkflow:
         # Compile the graph (no checkpointer needed for simple linear workflow)
         graph = graph_builder.compile()
         
-        logger.info("🏗️ RAG workflow ready (with conditional routing)")
+        logger.info("🏗️ RAG workflow ready (with configurable prompts)")
         return graph
     
     def invoke(self, initial_state: dict) -> dict:
@@ -51,8 +53,15 @@ class RAGWorkflow:
     def stream(self, initial_state: dict):
         """Stream the RAG workflow execution."""
         return self.graph.stream(initial_state)
+    
+    def reload_prompts(self):
+        """Reload prompts from configuration."""
+        self.prompt_manager.reload_prompts()
+        logger.info("Prompts reloaded in RAG workflow")
 
 
-def create_rag_workflow(llm, retriever, k: int = 2) -> RAGWorkflow:
-    """Factory function to create a RAG workflow."""
-    return RAGWorkflow(llm, retriever, k)
+def create_rag_workflow(llm, retriever, k: int = 2, 
+                       prompt_config: str = None, prompt_variant: str = "default") -> RAGWorkflow:
+    """Factory function to create a RAG workflow with configurable prompts."""
+    prompt_manager = PromptManager(config_path=prompt_config, variant=prompt_variant)
+    return RAGWorkflow(llm, retriever, k, prompt_manager)

@@ -18,6 +18,7 @@ faiss-cpu = "^1.8.0"
 python-dotenv = "^1.0.0"
 pydantic-settings = "^2.4.0"
 tqdm = "^4.66.0"
+pyyaml = "^6.0.0"
 # PDF processing libraries (multiple options for best compatibility)
 PyPDF2 = {version = "^3.0.0", optional = true}
 pypdf = {version = "^4.0.0", optional = true}

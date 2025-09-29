@@ -37,7 +37,9 @@ def extract_conversation_context(messages: List[BaseMessage], max_messages: int 
 
 
 def create_conversation_summary_prompt(messages: List[BaseMessage], current_summary: str = None) -> str:
-    """Create a prompt for conversation summarization."""
+    """Create a prompt for conversation summarization using PromptManager."""
+    from .prompt_manager import PromptManager
+    
     # Convert messages to text format for summarization
     conversation_text = []
     for msg in messages:
@@ -48,20 +50,6 @@ def create_conversation_summary_prompt(messages: List[BaseMessage], current_summ
     
     conversation = "\n".join(conversation_text)
     
-    if current_summary:
-        return f"""You are summarizing a conversation between an employee and their company assistant. Update the conversation summary.
-
-Previous summary:
-{current_summary}
-
-New conversation:
-{conversation}
-
-Updated summary (max 150 words):"""
-    else:
-        return f"""You are summarizing a conversation between an employee and their company assistant. Summarize this conversation.
-
-Conversation:
-{conversation}
-
-Summary (max 150 words):"""
+    # Use PromptManager for consistent prompt handling
+    prompt_manager = PromptManager()
+    return prompt_manager.get_summarization_prompt(conversation, current_summary)
