@@ -27,13 +27,14 @@ from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langgraph.graph import StateGraph, END
-from langgraph.graph.message import add_messages
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import BaseModel
-from typing_extensions import Annotated, TypedDict
 from tqdm import tqdm
+
+# Add src to path so we can import our RAG package
+sys.path.append(str(Path(__file__).parent.parent / "src"))
+
+# Import our RAG package
+from rag import create_rag_workflow, RAGState, create_conversation_summary_prompt
 
 # Enhanced PDF support with multiple fallback options
 PDF_READERS = {}
@@ -99,6 +100,7 @@ class EnhancedChatMessageHistory(BaseChatMessageHistory, BaseModel):
     metadata: ThreadMetadata
     max_messages: int = 20  # Reduced limit since we use summarization
     summarize_threshold: int = 12  # Start summarizing after this many messages
+    llm: Optional[Any] = None  # LLM for summarization
     
     def add_message(self, message: BaseMessage) -> None:
         self.messages.append(message)
@@ -125,9 +127,10 @@ class EnhancedChatMessageHistory(BaseChatMessageHistory, BaseModel):
                 # Get messages to summarize (exclude very recent ones)
                 messages_to_summarize = self.messages[:-4] if len(self.messages) > 4 else self.messages[:-2]
                 
-                if messages_to_summarize:
+                if messages_to_summarize and self.llm:
                     new_summary = create_conversation_summary(
                         messages_to_summarize,
+                        self.llm,
                         self.metadata.summary
                     )
                     
@@ -162,10 +165,11 @@ class EnhancedChatMessageHistory(BaseChatMessageHistory, BaseModel):
 class ThreadSafeMemoryManager:
     """Thread-safe memory manager for chat sessions."""
     
-    def __init__(self, state_dir: str = ".state", max_threads_per_user: int = 10):
+    def __init__(self, state_dir: str = ".state", max_threads_per_user: int = 10, llm=None):
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(exist_ok=True)
         self.max_threads_per_user = max_threads_per_user
+        self.llm = llm  # LLM for summarization
         
         # Thread-safe caches
         self._history_cache: Dict[str, EnhancedChatMessageHistory] = {}
@@ -244,7 +248,7 @@ class ThreadSafeMemoryManager:
             )
             
             # Create history
-            history = EnhancedChatMessageHistory(metadata=metadata)
+            history = EnhancedChatMessageHistory(metadata=metadata, llm=self.llm)
             
             # Load messages
             for msg_data in data.get("messages", []):
@@ -269,7 +273,7 @@ class ThreadSafeMemoryManager:
             last_accessed=datetime.now()
         )
         
-        history = EnhancedChatMessageHistory(metadata=metadata)
+        history = EnhancedChatMessageHistory(metadata=metadata, llm=self.llm)
         self._history_cache[thread_id] = history
         
         # Update user mappings
@@ -421,26 +425,18 @@ class ThreadSafeMemoryManager:
 # Global memory manager
 _memory_manager: Optional[ThreadSafeMemoryManager] = None
 
-# Global variables for dependencies (like your previous implementation)
-global_llm = None
-global_retriever = None
+# Note: global_llm and global_retriever are no longer needed 
+# as they're handled by the RAG workflow package
 
 
-# LangGraph State Schema
-class RAGState(TypedDict):
-    """State for the RAG workflow."""
-    messages: Annotated[List[BaseMessage], add_messages]
-    question: str
-    rewritten_query: str
-    context: str
-    answer: str
-    needs_retrieval: bool  # New field for conditional routing
+# RAGState is now imported from the rag package
 
 
 def get_session_history(thread_id: str, user_id: str = "default") -> BaseChatMessageHistory:
     """Get or create chat history for a session using enhanced memory manager."""
     global _memory_manager
     if _memory_manager is None:
+        # Fallback initialization without LLM (summarization won't work)
         _memory_manager = ThreadSafeMemoryManager()
     
     return _memory_manager.get_or_create_thread(thread_id, user_id)
@@ -596,67 +592,42 @@ def handle_management_commands(command: str, current_user: str, current_thread: 
     return False, None, None
 
 
-def create_conversation_summary(messages: List[BaseMessage], current_summary: str = None) -> str:
+def create_conversation_summary(messages: List[BaseMessage], llm, current_summary: str = None) -> str:
     """Create or update conversation summary using LLM."""
-    global global_llm
+    logger.debug("=" * 70)
+    logger.debug("📝 CONVERSATION SUMMARIZATION")
+    logger.debug("=" * 70)
     
     if not messages:
+        logger.debug("No messages to summarize")
+        logger.debug("=" * 70)
         return current_summary or ""
     
-    # Convert messages to text format for summarization
-    conversation_text = []
-    for msg in messages:
-        if isinstance(msg, HumanMessage):
-            conversation_text.append(f"Employee: {msg.content}")
-        elif isinstance(msg, AIMessage):
-            conversation_text.append(f"Assistant: {msg.content}")
+    logger.info(f"📝 Summarizing {len(messages)} messages")
     
-    conversation = "\n".join(conversation_text)
+    # Use the utility function from RAG package to create the prompt
+    summary_prompt = create_conversation_summary_prompt(messages, current_summary)
     
-    if current_summary:
-        # Update existing summary
-        summary_prompt = f"""You are summarizing a conversation between a Bank of England employee and an HR assistant.
-
-Previous conversation summary:
-{current_summary}
-
-New conversation to add:
-{conversation}
-
-Create an updated summary that:
-- Captures key topics discussed
-- Maintains important context for future questions
-- Includes any employee preferences or specific situations mentioned
-- Keeps track of ongoing issues or requests
-- Is concise but informative (max 200 words)
-
-Updated summary:"""
-    else:
-        # Create initial summary
-        summary_prompt = f"""You are summarizing a conversation between a Bank of England employee and an HR assistant.
-
-Conversation:
-{conversation}
-
-Create a summary that:
-- Captures key topics discussed
-- Maintains important context for future questions
-- Includes any employee preferences or specific situations mentioned
-- Keeps track of ongoing issues or requests
-- Is concise but informative (max 200 words)
-
-Summary:"""
+    logger.debug(f"Summary prompt length: {len(summary_prompt)} chars")
+    logger.debug("Full summarization prompt being sent to vLLM:")
+    logger.debug("-" * 50)
+    logger.debug(summary_prompt)
+    logger.debug("-" * 50)
     
     try:
-        if global_llm:
-            summary = global_llm.invoke(summary_prompt).content.strip()
-            logger.debug(f"Created conversation summary: {len(summary)} chars")
+        if llm:
+            summary = llm.invoke(summary_prompt).content.strip()
+            logger.info(f"📝 Created summary: {summary}")
+            logger.debug(f"Created summary length: {len(summary)} chars")
+            logger.debug("=" * 70)
             return summary
         else:
             logger.warning("No LLM available for summarization")
+            logger.debug("=" * 70)
             return current_summary or ""
     except Exception as e:
         logger.error(f"Failed to create summary: {e}")
+        logger.debug("=" * 70)
         return current_summary or ""
 
 
@@ -890,242 +861,10 @@ def load_documents(docs_path: str) -> List[Document]:
     return documents
 
 
-def format_docs(docs: List[Document]) -> str:
-    """Format documents for context with citations."""
-    formatted = []
-    for i, doc in enumerate(docs, 1):
-        content = doc.page_content[:1000]  # First 1000 chars
-        source = doc.metadata.get("source", "Unknown")
-        formatted.append(f"[{i}] {content}\nSOURCE: {source}")
-    
-    return "\n\n".join(formatted)
+# format_docs function moved to RAG package
 
 
-def query_classifier_node(state: RAGState) -> RAGState:
-    """Classify if query needs document retrieval or can be answered directly."""
-    question = state["question"]
-    messages = state["messages"]
-    
-    logger.info(f"🎯 Classifying query: '{question}'")
-    
-    # Get conversation context (summary + recent messages) instead of full history
-    # For classification, we only need recent context
-    recent_messages = messages[-6:] if len(messages) > 6 else messages
-    context_text = ""
-    
-    if len(recent_messages) > 1:
-        context_parts = []
-        for msg in recent_messages[:-1]:  # Exclude current question
-            if isinstance(msg, HumanMessage):
-                context_parts.append(f"Employee: {msg.content}")
-            elif isinstance(msg, AIMessage):
-                context_parts.append(f"Assistant: {msg.content}")
-        context_text = "\n".join(context_parts) if context_parts else ""
-    
-    # Classification prompt
-    classify_prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are a query classifier for an internal company knowledge system.
-
-Analyze the user's question and determine if it needs document retrieval from company documents.
-
-**ALWAYS RETRIEVE** for ANY company-specific information including:
-- Benefits, leave policies, vacation days, PTO
-- Employee handbook topics and HR policies  
-- Company procedures, processes, workflows
-- Technical guidelines, standards, protocols
-- Internal forms, applications, requirements
-- Salary, compensation, performance reviews
-- Training, onboarding, compliance
-- Company dates, deadlines, schedules
-- Office policies, equipment, facilities
-- ANY question about "How many...", "What dates...", "How do I..." related to work
-- ANY question that could have a company-specific answer
-
-**ONLY DIRECT ANSWER** for clearly general knowledge:
-- Basic math calculations (2+2, percentages)
-- Common facts (capitals of countries, historical dates)
-- General explanations of concepts (not company-specific)
-- Simple greetings like "hello" or "how are you"
-
-When in doubt, choose RETRIEVE. It's better to search documents than miss company-specific information.
-
-Respond with ONLY:
-- "RETRIEVE" if the answer might be in company documents
-- "DIRECT" if it's clearly general knowledge unrelated to the company"""),
-        ("human", f"Recent context:\n{context_text}\n\nCurrent question: {question}")
-    ])
-    
-    classifier_chain = classify_prompt | global_llm | (lambda x: x.content.strip())
-    decision = classifier_chain.invoke({})
-    
-    needs_retrieval = decision.upper() == "RETRIEVE"
-    logger.info(f"📋 Classification: {decision} → needs_retrieval={needs_retrieval}")
-    
-    return {"needs_retrieval": needs_retrieval}
-
-
-def rewrite_query_node(state: RAGState) -> RAGState:
-    """Node to rewrite the query using conversation context."""
-    question = state["question"]
-    messages = state["messages"]
-    needs_retrieval = state["needs_retrieval"]
-    
-    # Only rewrite if we need retrieval
-    if not needs_retrieval:
-        logger.info(f"🔄 Query: '{question}' (direct answer - no rewrite needed)")
-        return {"rewritten_query": question}
-    
-    # Get recent conversation context for query rewriting
-    recent_messages = messages[-8:] if len(messages) > 8 else messages
-    context_text = ""
-    
-    if len(recent_messages) > 1:
-        context_parts = []
-        for msg in recent_messages[:-1]:  # Exclude current question
-            if isinstance(msg, HumanMessage):
-                context_parts.append(f"Employee: {msg.content}")
-            elif isinstance(msg, AIMessage):
-                context_parts.append(f"Assistant: {msg.content}")
-        context_text = "\n".join(context_parts) if context_parts else ""
-    
-    # If no context, use original question
-    if not context_text:
-        rewritten_query = question
-        logger.info(f"🔄 Query: '{question}' (no context)")
-    else:
-        # Context-aware query rewriter
-        rewrite_prompt = ChatPromptTemplate.from_messages([
-            ("system", "You rewrite the user's latest question into a standalone query using the conversation context. Return ONLY the rewritten query."),
-            ("human", f"Recent conversation:\n{context_text}\n\nLatest question: {question}\n\nRewritten standalone query:")
-        ])
-        
-        rewriter_chain = rewrite_prompt | global_llm | (lambda x: x.content)
-        rewritten_query = rewriter_chain.invoke({})
-        logger.info(f"🔄 Query: '{question}' → '{rewritten_query}'")
-    
-    return {"rewritten_query": rewritten_query}
-
-
-def retrieve_node(state: RAGState) -> RAGState:
-    """Node to retrieve relevant documents (only if needed)."""
-    needs_retrieval = state["needs_retrieval"]
-    rewritten_query = state["rewritten_query"]
-    
-    # Skip retrieval if not needed
-    if not needs_retrieval:
-        logger.info("🔍 Skipping retrieval (direct answer)")
-        return {"context": ""}
-    
-    logger.info(f"🔍 Retrieving docs for: '{rewritten_query}'")
-    
-    # Retrieve documents
-    docs = global_retriever.get_relevant_documents(rewritten_query)
-    
-    # Log sources found
-    sources = [doc.metadata.get("source", "Unknown").split("/")[-1] for doc in docs]
-    logger.info(f"📚 Found {len(docs)} docs: {', '.join(sources)}")
-    
-    context = format_docs(docs)
-    return {"context": context}
-
-
-def generate_node(state: RAGState) -> RAGState:
-    """Node to generate the final answer."""
-    question = state["question"]
-    context = state["context"]
-    messages = state["messages"]
-    needs_retrieval = state["needs_retrieval"]
-    
-    # Get contextual history (summary + recent messages) instead of full history
-    # Find the session history to get the contextual information
-    session_history = None
-    thread_id = None
-    
-    # Try to extract thread info from messages or use a simplified context approach
-    recent_messages = messages[-10:] if len(messages) > 10 else messages
-    conversation_context = ""
-    
-    if len(recent_messages) > 1:
-        context_parts = []
-        for msg in recent_messages[:-1]:  # Exclude current question
-            if isinstance(msg, HumanMessage):
-                context_parts.append(f"Employee: {msg.content}")
-            elif isinstance(msg, AIMessage):
-                context_parts.append(f"Assistant: {msg.content}")
-        conversation_context = "\n".join(context_parts) if context_parts else ""
-    
-    if needs_retrieval and context:
-        # Retrieval-based answer with context
-        logger.info("🤖 Generating retrieval-based answer")
-        prompt_content = f"""You are a helpful Bank of England HR assistant. Answer the employee's question using the information available to you. Be natural and conversational. Do not mention 'context', 'documents', or 'provided information' - just answer as if you naturally know this information. If you don't have the specific information needed, politely say you don't have that information available.
-
-Available information:
-{context}
-
-{f"Recent conversation context:{conversation_context}" if conversation_context else ""}
-
-Employee question: {question}"""
-
-        answer_prompt = ChatPromptTemplate.from_messages([
-            ("human", prompt_content)
-        ])
-        
-        answer = answer_prompt | global_llm | (lambda x: x.content)
-        response = answer.invoke({})
-        
-    else:
-        # Direct answer without retrieval
-        logger.info("🤖 Generating direct answer (general knowledge)")
-        prompt_content = f"""You are a friendly Bank of England assistant. Answer the employee's question naturally and conversationally. For greetings and casual conversation, be warm and professional. For general knowledge questions, provide helpful answers while keeping in mind you're assisting a Bank of England employee.
-
-{f"Recent conversation context:{conversation_context}" if conversation_context else ""}
-
-Employee question: {question}"""
-
-        direct_prompt = ChatPromptTemplate.from_messages([
-            ("human", prompt_content)
-        ])
-        
-        answer = direct_prompt | global_llm | (lambda x: x.content)
-        response = answer.invoke({})
-    
-    logger.info(f"💬 Generated answer ({len(response)} chars)")
-    
-    return {"answer": response}
-
-
-def build_rag_graph(llm: ChatOpenAI, retriever, k: int):
-    """Build the LangGraph-based RAG workflow with conditional routing."""
-    global global_llm, global_retriever
-    
-    # Set global dependencies (like your previous implementation)
-    global_llm = llm
-    global_retriever = retriever
-    
-    # Create the state graph
-    graph_builder = StateGraph(RAGState)
-    
-    # Add nodes (clean approach like your previous implementation)
-    graph_builder.add_node(query_classifier_node)
-    graph_builder.add_node(rewrite_query_node)
-    graph_builder.add_node(retrieve_node)
-    graph_builder.add_node(generate_node)
-    
-    # Define the flow with conditional routing
-    graph_builder.set_entry_point("query_classifier_node")
-    graph_builder.add_edge("query_classifier_node", "rewrite_query_node")
-    graph_builder.add_edge("rewrite_query_node", "retrieve_node")
-    graph_builder.add_edge("retrieve_node", "generate_node")
-    graph_builder.add_edge("generate_node", END)
-    
-    # Compile the graph with enhanced memory checkpointing
-    # Use MemorySaver for LangGraph's internal state management
-    # Our enhanced memory system handles the chat history persistence
-    checkpointer = MemorySaver()
-    graph = graph_builder.compile(checkpointer=checkpointer)
-    
-    logger.info("🏗️ Enhanced RAG workflow ready (with conditional routing & enhanced memory)")
-    return graph
+# All node functions moved to RAG package (src/rag/nodes.py)
 
 
 def main():
@@ -1142,7 +881,7 @@ def main():
     
     args = parser.parse_args()
     
-    # Initialize global memory manager with user settings
+    # Initialize global memory manager with user settings (will be updated with LLM later)
     global _memory_manager
     _memory_manager = ThreadSafeMemoryManager(max_threads_per_user=args.max_threads)
     
@@ -1171,6 +910,9 @@ def main():
     try:
         # Create LLM
         llm = create_llm_provider(provider, model)
+        
+        # Update memory manager with LLM for summarization
+        _memory_manager.llm = llm
         
         # Create embeddings (always OpenAI for now)
         openai_api_key = os.getenv("OPENAI_API_KEY")
@@ -1203,8 +945,8 @@ def main():
         vectorstore = FAISS.from_documents(splits, embeddings)
         retriever = vectorstore.as_retriever(search_kwargs={"k": args.k})
         
-        # Build RAG graph
-        rag_graph = build_rag_graph(llm, retriever, args.k)
+        # Build RAG workflow
+        rag_workflow = create_rag_workflow(llm, retriever, args.k)
         
         # Initialize session variables
         current_user = args.user
@@ -1265,11 +1007,20 @@ def main():
                 # Process query
                 start_time = time.time()
                 
-                if args.verbose:
-                    logger.info(f"🚀 Processing: '{user_input}'")
+                logger.info(f"🚀 Starting RAG workflow: '{user_input}'")
+                logger.debug("🚀" * 35)
+                logger.debug("🚀 STARTING RAG WORKFLOW")
+                logger.debug("🚀" * 35)
+                logger.debug(f"User: {current_user}")
+                logger.debug(f"Thread: {current_thread}")
+                logger.debug(f"Input: '{user_input}'")
+                logger.debug(f"Verbose mode: {args.verbose}")
                 
                 # Get current session history with user context
                 session_history = get_session_history(current_thread, current_user)
+                logger.debug(f"Session history length: {len(session_history.messages)} messages")
+                if hasattr(session_history.metadata, 'summary') and session_history.metadata.summary:
+                    logger.debug(f"Has conversation summary: {len(session_history.metadata.summary)} chars")
                 
                 # Create initial state with user message
                 user_message = HumanMessage(content=user_input)
@@ -1282,18 +1033,19 @@ def main():
                     "needs_retrieval": False  # Will be determined by classifier
                 }
                 
-                # Run the graph
-                result = rag_graph.invoke(
-                    initial_state,
-                    config={"configurable": {"thread_id": current_thread}}
-                )
+                # Run the workflow
+                result = rag_workflow.invoke(initial_state)
                 
                 # Get the answer
                 answer = result["answer"]
                 elapsed = time.time() - start_time
                 
-                if args.verbose:
-                    logger.info(f"✅ Complete ({elapsed:.2f}s)\n")
+                logger.info(f"✅ RAG workflow completed in {elapsed:.2f}s")
+                logger.debug("🎉" * 35)
+                logger.debug("🎉 RAG WORKFLOW COMPLETE")
+                logger.debug("🎉" * 35)
+                logger.debug(f"Total time: {elapsed:.2f}s")
+                logger.debug(f"Final answer length: {len(answer)} chars")
                 
                 print(f"bot> {answer}")
                 print(f"(time: {elapsed:.2f}s)")
