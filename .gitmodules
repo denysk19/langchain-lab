@@ -1,0 +1,3 @@
+[submodule "src/rag-module"]
+	path = src/rag-module
+	url = git@github.com:denysk19/rag-workflow.git

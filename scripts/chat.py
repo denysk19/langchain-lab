@@ -34,7 +34,7 @@ from tqdm import tqdm
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 # Import our RAG package
-from rag import create_rag_workflow, RAGState, create_conversation_summary_prompt
+from src.rag_module.src.rag_workflow import create_rag_workflow, RAGState, create_conversation_summary_prompt
 
 # Enhanced PDF support with multiple fallback options
 PDF_READERS = {}
