@@ -2472,6 +2472,29 @@ files = [
 ]
 
 [[package]]
+name = "rag-workflow"
+version = "0.1.0"
+description = "RAG workflow module using LangChain and LangGraph"
+optional = false
+python-versions = "^3.11"
+groups = ["main"]
+files = []
+develop = true
+
+[package.dependencies]
+langchain = "^0.3.0"
+langchain-community = "^0.3.0"
+langchain-openai = "^0.2.0"
+langchain-text-splitters = "^0.3.0"
+langgraph = "^0.2.0"
+pydantic-settings = "^2.4.0"
+pyyaml = "^6.0.0"
+
+[package.source]
+type = "directory"
+url = "src/rag-module"
+
+[[package]]
 name = "regex"
 version = "2025.9.18"
 description = "Alternative regular expression module, to replace re."
@@ -3157,4 +3180,4 @@ pdf-legacy = ["PyPDF2"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.11"
-content-hash = "9e9dc7bf91d81fb391d8d9ff09523aea10e22c179dc14efd9d26deeedb69cf8f"
+content-hash = "be5ebe3fa5481bff659a210a2e61edccc10084ef5b5a3cdc5cfdad7cec7eb4c4"

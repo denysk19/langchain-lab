@@ -30,11 +30,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel
 from tqdm import tqdm
 
-# Add src to path so we can import our RAG package
-sys.path.append(str(Path(__file__).parent.parent / "src"))
-
-# Import our RAG package
-from src.rag_module.src.rag_workflow import create_rag_workflow, RAGState, create_conversation_summary_prompt
+# Import our RAG package (installed as local dependency)
+from rag_workflow import create_rag_workflow, RAGState, create_conversation_summary_prompt
 
 # Enhanced PDF support with multiple fallback options
 PDF_READERS = {}

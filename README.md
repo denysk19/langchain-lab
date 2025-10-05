@@ -1,35 +1,30 @@
 # IKB LangChain Lab
 
-A minimal, production-quality RAG (Retrieval-Augmented Generation) chatbot that runs entirely in the console. Features persistent thread memory, in-memory FAISS vector store, and support for both OpenAI and vLLM providers.
+A console-based RAG (Retrieval-Augmented Generation) chatbot with persistent thread memory and modular RAG workflow architecture.
 
 ## Features
 
 - **Interactive Console Chat**: Terminal-based interface with persistent conversations
 - **Thread Memory**: Multi-turn conversations with history stored in `./.state/`
-- **History-Aware Retrieval**: Follow-up questions automatically rewritten using conversation context  
-- **Provider Flexibility**: Switch between OpenAI and vLLM (OpenAI-compatible) endpoints
-- **Document Support**: Load `.md`, `.txt`, and optionally `.pdf` files from any directory
-- **In-Memory Indexing**: Fast FAISS vector store, no external database required
+- **Modular RAG Workflow**: Uses git submodule for reusable RAG components
+- **Provider Flexibility**: Switch between OpenAI and vLLM endpoints
+- **Document Support**: Load `.md`, `.txt`, and `.pdf` files from any directory
+- **Smart Query Routing**: Only retrieves documents when needed
 - **Source Citations**: Answers include bracketed references like [1], [2] to original documents
 
 ## Quick Start
 
 ### 1. Installation
 
-Using Poetry (recommended):
 ```bash
+# Clone with submodules
+git clone --recurse-submodules <repository-url>
+cd ikb-langchain-lab
+
+# Install dependencies (includes RAG workflow submodule)
 cp .env_example .env
 # Edit .env and set your OPENAI_API_KEY
 poetry install
-```
-
-Using pip (alternative):
-```bash
-cp .env_example .env
-# Edit .env and set your OPENAI_API_KEY
-pip install langchain>=0.3.0 langchain-community>=0.3.0 langchain-openai>=0.2.0 langchain-text-splitters>=0.3.0 langgraph>=0.2.0 faiss-cpu>=1.8.0 python-dotenv>=1.0.0 pydantic-settings>=2.4.0 tqdm>=4.66.0
-# Optional for PDF support:
-pip install PyPDF2>=3.0.0
 ```
 
 ### 2. Add Sample Documents
@@ -145,43 +140,27 @@ poetry install --extras pdf
 pip install PyPDF2~=3.0
 ```
 
-## How It Works
+## Architecture
 
-The system uses a **hybrid LangGraph + LangChain approach** for robust state management while keeping the workflow simple:
+The system uses a **modular RAG workflow** implemented as a git submodule:
 
-### **Architecture**
-- **LangGraph State Machine**: Manages workflow state and provides checkpointing
-- **LangChain Components**: Powers LLM interactions and document processing
-- **Linear Flow**: Simple 3-step process (rewrite → retrieve → generate)
+### **Components**
+- **RAG Workflow Module**: Reusable LangGraph-based workflow (git submodule)
+- **Main Application**: Console interface and document management
+- **Smart Query Classification**: Routes queries to retrieval or direct answer
+- **Thread Memory**: Persistent conversation history per thread
 
-### **Workflow Steps**
-1. **Document Loading**: Files from `--docs` directory are loaded and split into chunks
-2. **Embedding**: Each chunk is embedded using OpenAI's text-embedding-3-small
-3. **Indexing**: FAISS creates an in-memory vector index for fast similarity search
-4. **Query Processing** (Enhanced LangGraph nodes):
-   - **Classify Node**: Determines if query needs company docs or general knowledge
-   - **Rewrite Node**: History-aware query rewriting (only if retrieval needed)
-   - **Retrieve Node**: Document retrieval (only for company-specific queries)
-   - **Generate Node**: Context-based OR direct answers based on query type
-5. **Smart Routing**: Only retrieves documents when company-specific information is needed
-6. **Citations**: Retrieval-based answers include [1], [2] references to source documents
-7. **Memory**: Full conversation history maintained per thread with LangGraph checkpointing
+### **Workflow**
+1. **Query Classification**: Determines if retrieval is needed
+2. **Query Rewriting**: Context-aware query enhancement (if needed)
+3. **Document Retrieval**: FAISS similarity search (if needed)
+4. **Answer Generation**: Context-based or direct responses
+5. **Citation**: Automatic source references for retrieved content
 
-### **Benefits of Enhanced Approach**
-- ✅ **Robust State Management**: LangGraph handles complex state transitions
-- ✅ **Error Recovery**: Built-in checkpointing and state persistence
-- ✅ **Smart Routing**: Only retrieves when company-specific info is needed
-- ✅ **Dual Mode**: Handles both document-based and general knowledge queries
-- ✅ **Extensible**: Easy to add conditional logic or new nodes later
-- ✅ **Production-Ready**: Better error handling than pure LCEL chains
-- ✅ **Observable**: Detailed logging shows data flow between workflow nodes
-- ✅ **Efficient**: Saves API calls by skipping unnecessary retrieval
+## Debugging
 
-## Workflow Logging
+Enable verbose logging to see workflow details:
 
-The hybrid implementation includes comprehensive logging to help you understand how data flows through the LangGraph nodes:
-
-### **Enable Logging**
 ```bash
 # Basic verbose logging
 python scripts/chat.py --verbose
@@ -190,57 +169,27 @@ python scripts/chat.py --verbose
 python scripts/chat.py --log-level DEBUG
 ```
 
-### **What You'll See**
-With verbose logging enabled, you'll see detailed information about:
+## Development
 
-- **State Initialization**: Input question and message history
-- **Rewrite Node**: How queries are rewritten using conversation context
-- **Retrieve Node**: Which documents are found and their sources
-- **Generate Node**: How the final answer is constructed with citations
-- **State Transfers**: Data passed between each workflow node
-- **Memory Management**: How conversation history is loaded and saved
+### Working with the RAG Submodule
 
-### **Example Log Output**
+The RAG workflow is implemented as a git submodule for reusability:
 
-**Company-specific query (with retrieval):**
+```bash
+# Update submodule to latest
+git submodule update --remote src/rag-module
+
+# Make changes to the submodule
+cd src/rag-module
+# ... make changes ...
+git add . && git commit -m "Update RAG workflow"
+git push
+
+# Update main project to use new submodule version
+cd ../..
+git add src/rag-module
+git commit -m "Update RAG module reference"
 ```
-🚀 Processing: 'How many vacation days?'
-🎯 Classifying query: 'How many vacation days?'
-📋 Classification: RETRIEVE → needs_retrieval=True
-🔄 Query: 'How many vacation days?' (no history)
-🔍 Retrieving docs for: 'How many vacation days?'
-📚 Found 2 docs: company-policies.md, benefits-overview.txt
-🤖 Generating retrieval-based answer
-💬 Generated answer (156 chars)
-✅ Complete (1.45s)
-```
-
-**General knowledge query (direct answer):**
-```
-🚀 Processing: 'What is the capital of France?'
-🎯 Classifying query: 'What is the capital of France?'
-📋 Classification: DIRECT → needs_retrieval=False
-🔄 Query: 'What is the capital of France?' (direct answer - no rewrite needed)
-🔍 Skipping retrieval (direct answer)
-🤖 Generating direct answer (general knowledge)
-💬 Generated answer (89 chars)
-✅ Complete (0.78s)
-```
-
-## Cost Considerations
-
-- **Embeddings**: ~$0.0001 per 1K tokens (one-time cost during startup)
-- **LLM Queries**: Varies by provider and model
-  - OpenAI GPT-4o-mini: ~$0.0015 per 1K input tokens
-  - vLLM: Cost depends on your hosting setup
-- **Storage**: Vector index stored in memory only (no persistent storage costs)
-
-### Cost Optimization Tips
-
-- Use smaller embedding models: `text-embedding-3-small` vs `text-embedding-3-large`
-- Use efficient chat models: `gpt-4o-mini` vs `gpt-4`
-- Reduce chunk overlap and size for fewer embeddings
-- Use local vLLM deployment for zero API costs
 
 ## Troubleshooting
 
@@ -284,23 +233,6 @@ poetry run pytest tests/
 ```bash
 poetry run ruff check scripts/ src/
 poetry run ruff format scripts/ src/
-```
-
-### Project Structure
-
-```
-ikb-langchain-lab/
-├── scripts/
-│   └── chat.py                 # Main interactive console app
-├── src/adapters/
-│   └── vllm_client_adapter.py  # Optional direct vLLM client
-├── docs/                       # Sample documents  
-├── tests/
-│   └── test_rag_smoke.py       # Basic functionality test
-├── .state/                     # Thread memory storage (created at runtime)
-├── pyproject.toml             # Poetry dependencies
-├── .env_example               # Environment template
-└── README.md                  # This file
 ```
 
 ## License
