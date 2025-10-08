@@ -1,3 +1,6 @@
 [submodule "src/rag-module"]
 	path = src/rag-module
 	url = git@github.com:denysk19/rag-workflow.git
+[submodule "src/ingestion"]
+	path = src/ingestion
+	url = git@github.com:denysk19/data-ingestion.git

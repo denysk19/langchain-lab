@@ -1,241 +1,277 @@
-# IKB LangChain Lab
+# RAG Chatbot with Memory & Document Ingestion
 
-A console-based RAG (Retrieval-Augmented Generation) chatbot with persistent thread memory and modular RAG workflow architecture.
-
-## Features
-
-- **Interactive Console Chat**: Terminal-based interface with persistent conversations
-- **Thread Memory**: Multi-turn conversations with history stored in `./.state/`
-- **Modular RAG Workflow**: Uses git submodule for reusable RAG components
-- **Provider Flexibility**: Switch between OpenAI and vLLM endpoints
-- **Document Support**: Load `.md`, `.txt`, and `.pdf` files from any directory
-- **Smart Query Routing**: Only retrieves documents when needed
-- **Source Citations**: Answers include bracketed references like [1], [2] to original documents
+Console-based RAG chatbot with persistent memory, modular architecture, and advanced PDF ingestion.
 
 ## Quick Start
 
-### 1. Installation
+```bash
+# 1. Install dependencies
+poetry install
+
+# 2. Configure environment
+cp .env_example .env
+# Edit .env and add: OPENAI_API_KEY=sk-your-key-here
+
+# 3. Add PDF documents
+cp your-document.pdf docs/
+
+# 4. Run chatbot
+poetry run python scripts/chat.py --docs docs/
+```
+
+## Features
+
+- **Persistent Conversations**: Thread-based memory stored in `.state/`
+- **PDF Ingestion**: Dedicated ingestion module for document processing
+- **In-Memory Vector Store**: Fast MemoryStore with multi-tenancy support
+- **Smart Routing**: Only retrieves documents when needed
+- **Multi-Provider**: Switch between OpenAI and vLLM
+- **Source Citations**: Answers include document references
+
+## Installation
+
+### Prerequisites
+
+- Python 3.11+
+- Poetry (`curl -sSL https://install.python-poetry.org | python3 -`)
+- OpenAI API key
+
+### Setup
+
+The project uses two git submodules (both in `src/`):
+- `src/ingestion` - Document ingestion module
+- `src/rag-module` - RAG workflow module
 
 ```bash
 # Clone with submodules
-git clone --recurse-submodules <repository-url>
-cd ikb-langchain-lab
+git clone --recurse-submodules <repo-url>
+cd langchain-lab
 
-# Install dependencies (includes RAG workflow submodule)
-cp .env_example .env
-# Edit .env and set your OPENAI_API_KEY
+# If submodules not initialized
+git submodule update --init --recursive
+
+# Install everything (including submodules)
 poetry install
 ```
 
-### 2. Add Sample Documents
+### Configuration
+
+Create `.env` file:
 
 ```bash
-mkdir -p docs
-echo "Sample text about PTO policy. Employees get 20 vacation days per year." > docs/sample.md
+# Required
+OPENAI_API_KEY=sk-your-key-here
+
+# LLM Provider (choose one)
+LLM_PROVIDER=openai              # Use OpenAI
+MODEL=gpt-4o-mini
+
+# Or use vLLM
+# LLM_PROVIDER=vllm
+# VLLM_BASE_URL=http://localhost:8000
+# VLLM_MODEL=meta-llama/Meta-Llama-3-8B-Instruct
 ```
 
-Or use the included sample documents in the `docs/` folder.
+## Usage
 
-### 3. Start Chatting
+### Basic Commands
 
 ```bash
-poetry run python scripts/chat.py --thread my-conversation
+# Run chatbot
+poetry run python scripts/chat.py --docs docs/
+
+# With verbose logging
+poetry run python scripts/chat.py --docs docs/ --verbose
+
+# Custom configuration
+poetry run python scripts/chat.py \
+  --docs docs/ \
+  --k 10 \
+  --chunk-chars 1200 \
+  --chunk-overlap 200
 ```
 
-### 4. Chat Commands
-
-- Ask questions naturally: `"What is the PTO policy?"`
-- Follow-up questions work: `"How many days?"` (uses conversation history)
-- `/reset` - Clear conversation history for current thread
-- `/workflow` - Show the LangGraph workflow structure
-- `/exit` or `/quit` - Save and exit
-
-## Configuration
-
-### Environment Variables
-
-Copy `.env_example` to `.env` and configure:
+### Using Poetry Shell
 
 ```bash
-# Basic Configuration
-LLM_PROVIDER=openai          # or "vllm"
-MODEL=gpt-4o-mini           
-OPENAI_API_KEY=sk-...        # Required for OpenAI provider + embeddings
-EMBED_MODEL=text-embedding-3-small
+# Activate environment (no need to type 'poetry run' for each command)
+poetry shell
 
-# vLLM Configuration (only needed if LLM_PROVIDER=vllm)
-VLLM_BASE_URL=http://localhost:8000
-VLLM_API_KEY=sk-local        # Optional
-VLLM_MODEL=meta-llama/Meta-Llama-3-8B-Instruct
+python scripts/chat.py --docs docs/
+python test_integration.py
+
+# Exit when done
+exit
 ```
 
-### Provider Switching
+### In-Chat Commands
 
-**OpenAI (default):**
-- Set `LLM_PROVIDER=openai`
-- Requires `OPENAI_API_KEY`
-- Uses `MODEL` (e.g., `gpt-4o-mini`, `gpt-4`)
+- `/exit`, `/quit` - Save and exit
+- `/reset` - Clear conversation history
+- `/workflow` - Show RAG workflow diagram
+- `/threads` - List all threads
+- `/new [id]` - Create new thread
+- `/info` - Show session info
 
-**vLLM (OpenAI-compatible):**
-- Set `LLM_PROVIDER=vllm`
-- Requires `VLLM_BASE_URL` (your vLLM server endpoint)
-- Optionally set `VLLM_API_KEY` (if your server requires authentication)
-- Uses `VLLM_MODEL` (fallback to `MODEL` if not set)
-- Embeddings still use OpenAI, so `OPENAI_API_KEY` is still required
-
-## Command Line Options
+## Command-Line Options
 
 ```bash
-python scripts/chat.py [options]
+# Basic
+--docs DIRECTORY        # Documents directory (default: "docs")
+--thread THREAD_ID      # Thread ID for memory (default: "default")
+--user USER_ID          # User ID (default: "default")
+--k NUMBER              # Documents to retrieve (default: 8)
 
-Options:
-  --docs DIRECTORY     Documents directory to load (default: "docs")
-  --thread THREAD_ID   Thread ID for persistent memory (default: "default")  
-  --k NUMBER          Number of documents to retrieve (default: 4)
-  --verbose, -v       Enable verbose logging to see workflow state transfers
-  --log-level LEVEL   Set logging level: DEBUG, INFO, WARNING, ERROR
-```
+# Ingestion
+--tenant-id ID          # Tenant ID (default: "default-tenant")
+--owner-user-id ID      # Document owner (default: "admin")
+--visibility SCOPE      # "org" or "private" (default: "org")
+--chunk-chars NUMBER    # Chunk size (default: 1000)
+--chunk-overlap NUMBER  # Overlap (default: 150)
+--embed-model MODEL     # Embedding model (default: "text-embedding-3-small")
 
-Examples:
-```bash
-# Use different document folder
-python scripts/chat.py --docs /path/to/my/knowledge-base
+# Memory
+--max-messages NUMBER   # Max messages per thread (default: 100)
+--max-threads NUMBER    # Max threads per user (default: 10)
 
-# Different conversation thread
-python scripts/chat.py --thread project-alpha-discussion
-
-# Retrieve more context per query
-python scripts/chat.py --k 8
-
-# Enable verbose logging to see workflow state transfers
-python scripts/chat.py --verbose
-
-# Debug mode with maximum logging
-python scripts/chat.py --log-level DEBUG
-```
-
-## Thread Memory
-
-Conversations are automatically saved to `./.state/<thread-id>.json` and restored when you restart with the same `--thread` parameter.
-
-- **Persistent**: Conversations survive restarts
-- **Per-Thread**: Multiple independent conversation threads  
-- **Automatic**: No manual save/load required
-- **JSON Format**: Human-readable storage format
-
-## Document Loading
-
-The system automatically loads documents from the specified directory:
-
-- **Supported**: `.md`, `.txt` files (always), `.pdf` files (if PyPDF2 installed)
-- **Recursive**: Searches subdirectories automatically
-- **Chunking**: Documents split into 800-character chunks with 120-character overlap
-- **Source Tracking**: Each chunk retains reference to original file
-
-### Adding PDF Support
-
-```bash
-poetry install --extras pdf
-# or
-pip install PyPDF2~=3.0
+# Logging
+--verbose, -v           # Verbose logging
+--log-level LEVEL       # DEBUG, INFO, WARNING, ERROR
 ```
 
 ## Architecture
 
-The system uses a **modular RAG workflow** implemented as a git submodule:
+### Structure
 
-### **Components**
-- **RAG Workflow Module**: Reusable LangGraph-based workflow (git submodule)
-- **Main Application**: Console interface and document management
-- **Smart Query Classification**: Routes queries to retrieval or direct answer
-- **Thread Memory**: Persistent conversation history per thread
-
-### **Workflow**
-1. **Query Classification**: Determines if retrieval is needed
-2. **Query Rewriting**: Context-aware query enhancement (if needed)
-3. **Document Retrieval**: FAISS similarity search (if needed)
-4. **Answer Generation**: Context-based or direct responses
-5. **Citation**: Automatic source references for retrieved content
-
-## Debugging
-
-Enable verbose logging to see workflow details:
-
-```bash
-# Basic verbose logging
-python scripts/chat.py --verbose
-
-# Maximum detail logging
-python scripts/chat.py --log-level DEBUG
 ```
+src/
+├── ingestion/              # Ingestion submodule
+│   └── src/ingestion/
+│       ├── memory_store.py # In-memory vector store
+│       ├── models.py       # DocumentCtx
+│       └── ingest.py       # PDF processing
+├── rag-module/             # RAG workflow submodule
+│   └── src/rag_workflow/
+│       ├── graph.py        # LangGraph workflow
+│       ├── nodes.py        # Workflow nodes
+│       └── prompts.yaml    # Configurable prompts
+└── adapters/
+    └── memory_retriever_adapter.py  # LangChain adapter
+
+scripts/
+└── chat.py                 # Main application
+
+docs/                       # Place PDF documents here
+```
+
+### Workflow
+
+1. **Query Classification** - Determines if retrieval is needed
+2. **Query Rewriting** - Context-aware enhancement
+3. **Document Retrieval** - MemoryStore vector search
+4. **Answer Generation** - Context-based or direct response
+5. **Citation** - Automatic source references
+
+### Ingestion Pipeline
+
+1. PDFs loaded from `--docs` directory
+2. Processed by `ingest_pdf()` (extract text, metadata)
+3. Chunked with configurable size/overlap
+4. Embedded using OpenAI embeddings
+5. Stored in MemoryStore with multi-tenancy context
+6. Retrieved via LangChain adapter
 
 ## Development
 
-### Working with the RAG Submodule
+### Project Structure
 
-The RAG workflow is implemented as a git submodule for reusability:
-
-```bash
-# Update submodule to latest
-git submodule update --remote src/rag-module
-
-# Make changes to the submodule
-cd src/rag-module
-# ... make changes ...
-git add . && git commit -m "Update RAG workflow"
-git push
-
-# Update main project to use new submodule version
-cd ../..
-git add src/rag-module
-git commit -m "Update RAG module reference"
+```
+langchain-lab/
+├── .env                    # Environment config (not committed)
+├── .env_example            # Environment template
+├── pyproject.toml          # Poetry dependencies
+├── poetry.lock             # Locked versions
+├── docs/                   # PDF documents
+├── scripts/
+│   └── chat.py            # Main application
+├── src/
+│   ├── adapters/          # LangChain adapters
+│   ├── ingestion/         # Submodule: document ingestion
+│   └── rag-module/        # Submodule: RAG workflow
+├── tests/
+│   └── test_rag_smoke.py
+└── test_integration.py    # Integration verification
 ```
 
-## Troubleshooting
-
-### Common Issues
-
-**"No documents found"**
-- Ensure documents exist in the specified `--docs` directory
-- Check file extensions (`.md`, `.txt`, optionally `.pdf`)
-- Verify files are not empty
-
-**"OPENAI_API_KEY is required"**
-- Copy `.env_example` to `.env`
-- Set valid OpenAI API key for embeddings (required even with vLLM)
-
-**"VLLM_BASE_URL is required"**
-- When using `LLM_PROVIDER=vllm`, set the vLLM server endpoint
-- Ensure vLLM server is running and accessible
-
-**"I don't know" responses**
-- The AI only answers from provided documents
-- Add relevant documents to your `--docs` directory
-- Try rephrasing your question
-- Check if information exists in source documents
-
-### Performance Tips
-
-- **Startup Time**: Proportional to document count (embedding generation)
-- **Memory Usage**: Scales with document corpus size (FAISS index in RAM)
-- **Query Speed**: Fast retrieval (FAISS) + LLM latency
-
-## Development
-
-### Running Tests
+### Testing
 
 ```bash
+# Run integration test
+poetry run python test_integration.py
+
+# Run unit tests
 poetry run pytest tests/
+
+# Code quality
+poetry run ruff check scripts/ src/
 ```
 
-### Code Quality
+### Working with Submodules
 
 ```bash
-poetry run ruff check scripts/ src/
-poetry run ruff format scripts/ src/
+# Update submodules to latest
+git submodule update --remote
+
+# Update specific submodule
+cd src/ingestion
+git pull origin main
+cd ../..
+
+# Changes are immediately available (develop mode)
+poetry install  # Only if dependencies changed
+```
+
+
+## Examples
+
+### Basic Chat Session
+
+```bash
+$ poetry run python scripts/chat.py --docs docs/
+
+Loading 1 PDF files...
+✅ Ingested bank_handbook.pdf: 102 chunks
+Using provider: openai, model: gpt-4o-mini
+✅ Ready! User: default, Thread: default
+
+default> What is the refund policy?
+bot> According to the handbook, customers have 30 days for full refunds. [1]
+(time: 2.3s)
+
+default> Are there exceptions?
+bot> Yes, digital products are non-refundable. Defective items can be returned anytime. [1]
+(time: 1.8s)
+```
+
+### Multi-Tenancy
+
+```bash
+poetry run python scripts/chat.py \
+  --tenant-id acme-corp \
+  --owner-user-id john-doe \
+  --visibility org \
+  --docs /path/to/company-docs/
+```
+
+### Development with Verbose Logging
+
+```bash
+poetry run python scripts/chat.py \
+  --docs docs/ \
+  --log-level DEBUG \
+  --verbose
 ```
 
 ## License
 
 MIT License - see LICENSE file for details.
-

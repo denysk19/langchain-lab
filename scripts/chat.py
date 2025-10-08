@@ -17,21 +17,35 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 import threading
 
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from dotenv import load_dotenv
 from langchain_core.documents import Document
-from langchain_community.vectorstores import FAISS
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 from tqdm import tqdm
 
 # Import our RAG package (installed as local dependency)
 from rag_workflow import create_rag_workflow, RAGState, create_conversation_summary_prompt
+
+# Import ingestion module components
+try:
+    from ingestion.models import DocumentCtx
+    from ingestion.ingest import ingest_pdf
+    from ingestion.memory_store import MemoryStore
+    HAS_INGESTION = True
+except ImportError:
+    HAS_INGESTION = False
+    print("Warning: ingestion module not found. Install it as a submodule.")
+
+# Import our memory retriever adapter
+from src.adapters import MemoryRetrieverAdapter
 
 # Enhanced PDF support with multiple fallback options
 PDF_READERS = {}
@@ -748,50 +762,112 @@ def extract_pdf_content(file_path: str) -> str:
     return content
 
 
-def load_documents(docs_path: str) -> List[Document]:
-    """Load documents from the specified directory with enhanced PDF support."""
+def load_and_ingest_documents(docs_path: str, memory_store: "MemoryStore", 
+                              ctx: "DocumentCtx", chunk_chars: int = 1000, 
+                              overlap: int = 150) -> int:
+    """
+    Load documents from directory and ingest them into MemoryStore.
+    
+    Args:
+        docs_path: Path to documents directory
+        memory_store: MemoryStore instance to ingest into
+        ctx: DocumentCtx with tenant/document context
+        chunk_chars: Target chunk size in characters
+        overlap: Overlap between chunks
+        
+    Returns:
+        Total number of chunks ingested
+    """
+    if not HAS_INGESTION:
+        raise ImportError("Ingestion module not found. Cannot load documents.")
+    
+    # Find all PDF files
+    pdf_files = glob(os.path.join(docs_path, "**", "*.pdf"), recursive=True)
+    
+    if not pdf_files:
+        print(f"No PDF documents found in {docs_path}")
+        return 0
+    
+    print(f"Loading {len(pdf_files)} PDF files...")
+    
+    total_chunks = 0
+    
+    for file_path in tqdm(pdf_files):
+        try:
+            file_size = os.path.getsize(file_path)
+            logger.debug(f"Processing {file_path} ({file_size} bytes)")
+            
+            # Create a unique document_id based on the file path
+            file_name = os.path.basename(file_path)
+            doc_id = file_name.replace('.pdf', '').replace(' ', '_')
+            
+            # Update context for this specific document
+            doc_ctx = DocumentCtx(
+                tenant_id=ctx.tenant_id,
+                owner_user_id=ctx.owner_user_id,
+                document_id=doc_id,
+                visibility=ctx.visibility,
+                embedding_version=ctx.embedding_version
+            )
+            
+            # Read PDF bytes
+            with open(file_path, 'rb') as f:
+                pdf_bytes = f.read()
+            
+            # Ingest the PDF using the ingestion module
+            result = ingest_pdf(
+                ctx=doc_ctx,
+                filename=file_name,
+                raw_pdf_bytes=pdf_bytes,
+                sink=memory_store,
+                chunk_chars=chunk_chars,
+                overlap=overlap
+            )
+            
+            chunks_saved = result['chunks_saved']
+            total_chunks += chunks_saved
+            
+            logger.info(f"✅ Ingested {file_name}: {chunks_saved} chunks")
+            logger.debug(f"   Content hash: {result['content_hash']}")
+            logger.debug(f"   Embedding version: {result['embedding_version']}")
+            
+        except Exception as e:
+            print(f"Warning: Could not ingest {file_path}: {e}")
+            logger.debug(f"Error details for {file_path}: {e}", exc_info=True)
+    
+    print(f"✅ Ingested {total_chunks} total chunks from {len(pdf_files)} documents")
+    return total_chunks
+
+
+def load_documents_legacy(docs_path: str) -> List[Document]:
+    """
+    Legacy document loader (kept for backward compatibility with non-PDF files).
+    This is only used if you need to support non-PDF formats.
+    """
     documents = []
     
-    # Find all supported file types
+    # Find all supported file types (excluding PDFs as they use the new ingestion)
     patterns = [
         os.path.join(docs_path, "**", "*.md"),
         os.path.join(docs_path, "**", "*.txt"),
-        os.path.join(docs_path, "**", "*.docx"),  # Add Word support
+        os.path.join(docs_path, "**", "*.docx"),
     ]
-    
-    if HAS_PDF:
-        patterns.append(os.path.join(docs_path, "**", "*.pdf"))
-        logger.info(f"PDF support enabled with: {', '.join(PDF_READERS.keys())}")
-    else:
-        logger.warning("No PDF libraries found. Install one of: pypdf2, pypdf, pdfplumber, pymupdf")
     
     files = []
     for pattern in patterns:
         files.extend(glob(pattern, recursive=True))
     
     if not files:
-        print(f"No documents found in {docs_path}")
         return documents
     
-    print(f"Loading {len(files)} files...")
+    print(f"Loading {len(files)} non-PDF files (legacy mode)...")
     
     for file_path in tqdm(files):
         try:
             content = ""
             file_size = os.path.getsize(file_path)
-            logger.debug(f"Processing {file_path} ({file_size} bytes)")
             
-            if file_path.lower().endswith('.pdf'):
-                if HAS_PDF:
-                    content = extract_pdf_content(file_path)
-                    if not content.strip():
-                        print(f"Warning: Could not extract text from PDF {file_path}")
-                        continue
-                else:
-                    print(f"Skipping PDF {file_path} (no PDF libraries installed)")
-                    continue
-            
-            elif file_path.lower().endswith('.docx'):
+            if file_path.lower().endswith('.docx'):
                 try:
                     import docx2txt
                     content = docx2txt.process(file_path)
@@ -803,7 +879,6 @@ def load_documents(docs_path: str) -> List[Document]:
                     except ImportError:
                         print(f"Skipping DOCX {file_path} (install docx2txt or python-docx)")
                         continue
-            
             else:
                 # Handle text files with better encoding detection
                 encodings = ['utf-8', 'utf-16', 'latin-1', 'cp1252']
@@ -820,10 +895,6 @@ def load_documents(docs_path: str) -> List[Document]:
             
             # Validate content
             if content and content.strip():
-                # Clean up content
-                content = content.strip()
-                
-                # Add rich metadata
                 metadata = {
                     "source": file_path,
                     "file_name": os.path.basename(file_path),
@@ -834,26 +905,9 @@ def load_documents(docs_path: str) -> List[Document]:
                 
                 doc = Document(page_content=content, metadata=metadata)
                 documents.append(doc)
-                logger.debug(f"Loaded {file_path}: {len(content)} characters")
-            else:
-                print(f"Warning: Skipping empty file {file_path}")
                 
         except Exception as e:
             print(f"Warning: Could not read {file_path}: {e}")
-            logger.debug(f"Error details for {file_path}: {e}", exc_info=True)
-    
-    print(f"✅ Loaded {len(documents)} documents")
-    
-    # Print summary by file type
-    file_types = {}
-    for doc in documents:
-        file_type = doc.metadata.get('file_type', 'unknown')
-        file_types[file_type] = file_types.get(file_type, 0) + 1
-    
-    if file_types:
-        print("📋 Document types:")
-        for file_type, count in sorted(file_types.items()):
-            print(f"   {file_type}: {count} files")
     
     return documents
 
@@ -870,11 +924,19 @@ def main():
     parser.add_argument("--docs", default="docs", help="Documents directory")
     parser.add_argument("--thread", default="default", help="Thread ID for persistent memory")
     parser.add_argument("--user", default="default", help="User ID for session management")
-    parser.add_argument("--k", type=int, default=2, help="Number of documents to retrieve")
+    parser.add_argument("--k", type=int, default=8, help="Number of documents to retrieve")
     parser.add_argument("--max-messages", type=int, default=100, help="Maximum messages per thread")
     parser.add_argument("--max-threads", type=int, default=10, help="Maximum threads per user")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging to see workflow state transfers")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="INFO", help="Set logging level")
+    
+    # New ingestion parameters
+    parser.add_argument("--tenant-id", default="default-tenant", help="Tenant ID for multi-tenancy")
+    parser.add_argument("--owner-user-id", default="admin", help="Document owner user ID")
+    parser.add_argument("--visibility", choices=["org", "private"], default="org", help="Document visibility scope")
+    parser.add_argument("--chunk-chars", type=int, default=1000, help="Target chunk size in characters")
+    parser.add_argument("--chunk-overlap", type=int, default=150, help="Overlap between chunks")
+    parser.add_argument("--embed-model", default="text-embedding-3-small", help="Embedding model to use")
     
     args = parser.parse_args()
     
@@ -896,13 +958,22 @@ def main():
     # Load environment
     load_dotenv()
     
+    # Check for ingestion module
+    if not HAS_INGESTION:
+        print("ERROR: Ingestion module not found!")
+        print("Please install the ingestion module as a submodule or Python package.")
+        sys.exit(1)
+    
     # Get configuration
     provider = os.getenv("LLM_PROVIDER", "openai").lower()
     model = os.getenv("MODEL", "gpt-4o-mini")
-    embed_model = os.getenv("EMBED_MODEL", "text-embedding-3-small")
+    embedding_version = f"openai:{args.embed_model}@v1"
     
     print(f"Using provider: {provider}, model: {model}")
+    print(f"Embedding model: {args.embed_model}")
     print(f"Memory: max {args.max_messages} messages/thread, {args.max_threads} threads/user")
+    print(f"Ingestion: chunk_chars={args.chunk_chars}, overlap={args.chunk_overlap}")
+    print(f"Tenant: {args.tenant_id}, Owner: {args.owner_user_id}, Visibility: {args.visibility}")
     
     try:
         # Create LLM
@@ -911,36 +982,37 @@ def main():
         # Update memory manager with LLM for summarization
         _memory_manager.llm = llm
         
-        # Create embeddings (always OpenAI for now)
-        openai_api_key = os.getenv("OPENAI_API_KEY")
-        if not openai_api_key:
-            raise ValueError("OPENAI_API_KEY is required for embeddings")
+        # Create MemoryStore for document ingestion and retrieval
+        memory_store = MemoryStore()
         
-        embeddings = OpenAIEmbeddings(
-            model=embed_model,
-            api_key=openai_api_key
+        # Create document context
+        doc_ctx = DocumentCtx(
+            tenant_id=args.tenant_id,
+            owner_user_id=args.owner_user_id,
+            document_id="master",  # Will be overridden per document in ingestion
+            visibility=args.visibility,
+            embedding_version=embedding_version
         )
         
-        # Load and index documents
-        documents = load_documents(args.docs)
-        if not documents:
-            print("No documents found. Please add files to the docs directory.")
+        # Load and ingest documents into MemoryStore
+        total_chunks = load_and_ingest_documents(
+            docs_path=args.docs,
+            memory_store=memory_store,
+            ctx=doc_ctx,
+            chunk_chars=args.chunk_chars,
+            overlap=args.chunk_overlap
+        )
+        
+        if total_chunks == 0:
+            print("No documents ingested. Please add PDF files to the docs directory.")
             sys.exit(1)
         
-        # Split documents
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=800,
-            chunk_overlap=120
+        # Create LangChain-compatible retriever using the adapter
+        retriever = MemoryRetrieverAdapter(
+            store=memory_store,
+            ctx=doc_ctx,
+            top_k=args.k
         )
-        
-        print("Splitting documents...")
-        splits = text_splitter.split_documents(documents)
-        print(f"Created {len(splits)} chunks")
-        
-        # Create vector store
-        print("Building FAISS index...")
-        vectorstore = FAISS.from_documents(splits, embeddings)
-        retriever = vectorstore.as_retriever(search_kwargs={"k": args.k})
         
         # Build RAG workflow
         rag_workflow = create_rag_workflow(llm, retriever, args.k)
