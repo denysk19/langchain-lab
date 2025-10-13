@@ -4,3 +4,6 @@
 [submodule "src/ingestion"]
 	path = src/ingestion
 	url = git@github.com:denysk19/data-ingestion.git
+[submodule "src/llm-service-evaluation"]
+	path = src/llm-service-evaluation
+	url = git@github.com:denysk19/llm-service-evaluation.git
