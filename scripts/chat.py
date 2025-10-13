@@ -36,9 +36,8 @@ from rag_workflow import create_rag_workflow, RAGState, create_conversation_summ
 
 # Import ingestion module components
 try:
-    from ingestion.models import DocumentCtx
-    from ingestion.ingest import ingest_pdf
-    from ingestion.memory_store import MemoryStore
+    from ingestion import ingest_pdf, MemoryStore, DocumentCtx
+    from ingestion.config import get_config
     HAS_INGESTION = True
 except ImportError:
     HAS_INGESTION = False
@@ -763,8 +762,8 @@ def extract_pdf_content(file_path: str) -> str:
 
 
 def load_and_ingest_documents(docs_path: str, memory_store: "MemoryStore", 
-                              ctx: "DocumentCtx", chunk_chars: int = 1000, 
-                              overlap: int = 150) -> int:
+                              ctx: "DocumentCtx", chunk_size: int = None, 
+                              overlap: int = None) -> int:
     """
     Load documents from directory and ingest them into MemoryStore.
     
@@ -772,8 +771,8 @@ def load_and_ingest_documents(docs_path: str, memory_store: "MemoryStore",
         docs_path: Path to documents directory
         memory_store: MemoryStore instance to ingest into
         ctx: DocumentCtx with tenant/document context
-        chunk_chars: Target chunk size in characters
-        overlap: Overlap between chunks
+        chunk_size: Target chunk size (optional, uses config default if None)
+        overlap: Overlap between chunks (optional, uses config default if None)
         
     Returns:
         Total number of chunks ingested
@@ -815,21 +814,28 @@ def load_and_ingest_documents(docs_path: str, memory_store: "MemoryStore",
                 pdf_bytes = f.read()
             
             # Ingest the PDF using the ingestion module
-            result = ingest_pdf(
-                ctx=doc_ctx,
-                filename=file_name,
-                raw_pdf_bytes=pdf_bytes,
-                sink=memory_store,
-                chunk_chars=chunk_chars,
-                overlap=overlap
-            )
+            # Build kwargs for optional parameters
+            ingest_kwargs = {
+                'ctx': doc_ctx,
+                'filename': file_name,
+                'raw_pdf_bytes': pdf_bytes,
+                'sink': memory_store,
+            }
+            if chunk_size is not None:
+                ingest_kwargs['chunk_size'] = chunk_size
+            if overlap is not None:
+                ingest_kwargs['overlap'] = overlap
+            
+            result = ingest_pdf(**ingest_kwargs)
             
             chunks_saved = result['chunks_saved']
             total_chunks += chunks_saved
             
             logger.info(f"✅ Ingested {file_name}: {chunks_saved} chunks")
+            logger.debug(f"   Model: {result.get('embedding_model', 'N/A')} (dim={result.get('embedding_dimension', 'N/A')})")
             logger.debug(f"   Content hash: {result['content_hash']}")
-            logger.debug(f"   Embedding version: {result['embedding_version']}")
+            if 'stats' in result:
+                logger.debug(f"   Chunking method: {result['stats'].get('chunking_method', 'N/A')}")
             
         except Exception as e:
             print(f"Warning: Could not ingest {file_path}: {e}")
@@ -934,9 +940,8 @@ def main():
     parser.add_argument("--tenant-id", default="default-tenant", help="Tenant ID for multi-tenancy")
     parser.add_argument("--owner-user-id", default="admin", help="Document owner user ID")
     parser.add_argument("--visibility", choices=["org", "private"], default="org", help="Document visibility scope")
-    parser.add_argument("--chunk-chars", type=int, default=1000, help="Target chunk size in characters")
-    parser.add_argument("--chunk-overlap", type=int, default=150, help="Overlap between chunks")
-    parser.add_argument("--embed-model", default="text-embedding-3-small", help="Embedding model to use")
+    parser.add_argument("--chunk-size", type=int, default=None, help="Target chunk size (uses config default if not set)")
+    parser.add_argument("--chunk-overlap", type=int, default=None, help="Overlap between chunks (uses config default if not set)")
     
     args = parser.parse_args()
     
@@ -964,15 +969,19 @@ def main():
         print("Please install the ingestion module as a submodule or Python package.")
         sys.exit(1)
     
-    # Get configuration
+    # Get ingestion configuration
+    ingestion_config = get_config()
+    
+    # Get LLM configuration
     provider = os.getenv("LLM_PROVIDER", "openai").lower()
     model = os.getenv("MODEL", "gpt-4o-mini")
-    embedding_version = f"openai:{args.embed_model}@v1"
     
     print(f"Using provider: {provider}, model: {model}")
-    print(f"Embedding model: {args.embed_model}")
+    print(f"Embedding: {ingestion_config.embedding_provider} - {ingestion_config.get_embedding_model()}")
+    print(f"Chunking: {ingestion_config.chunk_size} {ingestion_config.chunking_method}s (overlap: {ingestion_config.chunk_overlap})")
     print(f"Memory: max {args.max_messages} messages/thread, {args.max_threads} threads/user")
-    print(f"Ingestion: chunk_chars={args.chunk_chars}, overlap={args.chunk_overlap}")
+    if args.chunk_size is not None or args.chunk_overlap is not None:
+        print(f"Chunk overrides: size={args.chunk_size}, overlap={args.chunk_overlap}")
     print(f"Tenant: {args.tenant_id}, Owner: {args.owner_user_id}, Visibility: {args.visibility}")
     
     try:
@@ -991,7 +1000,7 @@ def main():
             owner_user_id=args.owner_user_id,
             document_id="master",  # Will be overridden per document in ingestion
             visibility=args.visibility,
-            embedding_version=embedding_version
+            embedding_version=ingestion_config.get_embedding_model()
         )
         
         # Load and ingest documents into MemoryStore
@@ -999,7 +1008,7 @@ def main():
             docs_path=args.docs,
             memory_store=memory_store,
             ctx=doc_ctx,
-            chunk_chars=args.chunk_chars,
+            chunk_size=args.chunk_size,
             overlap=args.chunk_overlap
         )
         
