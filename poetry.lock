@@ -4710,4 +4710,4 @@ pdf-legacy = ["PyPDF2"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.11"
-content-hash = "acc11a48719a2369abb74daf52bb5a48568cf65413f3006afb5fe4091089ecde"
+content-hash = "01d4c809e2f6a32c8ff8ae004230319158aad5afdbb0d68d6aee827080578098"
