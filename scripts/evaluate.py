@@ -4,6 +4,25 @@ RAG Evaluation Framework - Inference Stage
 
 Runs the RAG system through golden datasets and stores comprehensive results
 with metadata tracking for experiment comparison and analysis.
+
+Debug Mode:
+-----------
+When enabled with --log-debug-information flag, additional debug columns are added to CSV:
+- debug_classification_latency: Time spent in query classification (seconds)
+- debug_rewrite_latency: Time spent in query rewriting (seconds)
+- debug_retrieval_latency: Time spent in document retrieval (seconds)
+- debug_generation_latency: Time spent in answer generation (seconds)
+- debug_retrieved_sources: Source filenames of retrieved documents
+- debug_retrieved_doc_ids: Document IDs of retrieved documents
+- debug_chunk_scores: Similarity scores of retrieved chunks
+- debug_original_query_length: Character length of original query
+- debug_rewritten_query_length: Character length of rewritten query
+- debug_context_length: Character length of retrieved context
+- debug_answer_length: Character length of generated answer
+- debug_workflow_state: Step-by-step workflow execution trace
+- debug_classification_prompt: Full prompt sent to LLM for classification
+- debug_rewrite_prompt: Full prompt sent to LLM for query rewriting
+- debug_generation_prompt: Full prompt sent to LLM for answer generation
 """
 
 import argparse
@@ -29,6 +48,8 @@ from tqdm import tqdm
 
 # Import RAG workflow
 from rag_workflow import create_rag_workflow
+from rag_workflow.prompt_manager import PromptManager
+from rag_workflow.utils import extract_conversation_context
 
 # Import ingestion module
 try:
@@ -45,11 +66,12 @@ from src.adapters import MemoryRetrieverAdapter
 
 # Set up logging
 logging.basicConfig(
-    level=logging.WARNING,  # Suppress verbose logs during evaluation
+    level=logging.INFO,  # Show configuration and progress info
     format='%(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger("RAG_EVAL")
+logger.setLevel(logging.INFO)
 
 
 # Cost estimation data (per 1K tokens)
@@ -83,6 +105,169 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     if isinstance(rates, dict):
         return (input_tokens * rates["input"] + output_tokens * rates["output"]) / 1000
     return (input_tokens + output_tokens) * rates / 1000
+
+
+def format_ground_truth_context(context: str) -> str:
+    """
+    Format ground truth context for better readability in CSV.
+    Adds a header to match the style of retrieved_context.
+    
+    Args:
+        context: Raw context text from golden dataset
+        
+    Returns:
+        Formatted context with header
+    """
+    if not context or not context.strip():
+        return ""
+    
+    return f"[Ground Truth Context]\n{context}\nSOURCE: Golden Dataset"
+
+
+def extract_debug_information(workflow, initial_state: dict, enable_debug: bool, 
+                             prompt_manager: Optional[PromptManager] = None) -> Dict[str, Any]:
+    """
+    Extract debug information from RAG workflow execution.
+    
+    Args:
+        workflow: RAG workflow instance
+        initial_state: Initial state for workflow
+        enable_debug: Whether to collect detailed debug info
+        prompt_manager: PromptManager instance for reconstructing prompts
+        
+    Returns:
+        Dictionary containing debug information and final result
+    """
+    if not enable_debug:
+        # Fast path - just run the workflow normally
+        result = workflow.invoke(initial_state)
+        return {
+            "result": result,
+            "debug": {}
+        }
+    
+    # Debug mode - collect intermediate states
+    debug_info = {
+        "classification_latency": 0,
+        "rewrite_latency": 0,
+        "retrieval_latency": 0,
+        "generation_latency": 0,
+        "retrieved_sources": "",
+        "retrieved_doc_ids": "",
+        "chunk_scores": "",
+        "original_query_length": len(initial_state["question"]),
+        "rewritten_query_length": 0,
+        "context_length": 0,
+        "answer_length": 0,
+        "workflow_state": "",
+        "classification_prompt": "",
+        "rewrite_prompt": "",
+        "generation_prompt": ""
+    }
+    
+    # Stream through workflow to capture intermediate timing
+    step_outputs = []
+    step_times = []
+    
+    try:
+        # Start with a copy of the initial state to accumulate updates
+        accumulated_state = initial_state.copy()
+        
+        start_time = time.time()
+        for step_output in workflow.stream(initial_state):
+            step_end_time = time.time()
+            step_outputs.append(step_output)
+            step_times.append(step_end_time - start_time)
+            
+            # Accumulate state updates from this node
+            # Each step_output is a dict like {"node_name": {updates}}
+            for node_name, updates in step_output.items():
+                accumulated_state.update(updates)
+            
+            start_time = step_end_time
+        
+        # Parse timing for each node
+        if len(step_times) >= 1:
+            debug_info["classification_latency"] = step_times[0]
+        if len(step_times) >= 2:
+            debug_info["rewrite_latency"] = step_times[1]
+        if len(step_times) >= 3:
+            debug_info["retrieval_latency"] = step_times[2]
+        if len(step_times) >= 4:
+            debug_info["generation_latency"] = step_times[3]
+        
+        # Use the accumulated state as the final result
+        result = accumulated_state
+        
+        # Extract additional debug info from result
+        if "rewritten_query" in result:
+            debug_info["rewritten_query_length"] = len(result["rewritten_query"])
+        if "context" in result:
+            debug_info["context_length"] = len(result["context"])
+        if "answer" in result:
+            debug_info["answer_length"] = len(result["answer"])
+        
+        # Create workflow state summary
+        workflow_summary = []
+        for i, step_output in enumerate(step_outputs):
+            node_name = list(step_output.keys())[0] if step_output else f"step_{i}"
+            workflow_summary.append(f"Step {i+1}: {node_name}")
+        debug_info["workflow_state"] = " → ".join(workflow_summary)
+        
+        # Reconstruct prompts if prompt_manager is available
+        if prompt_manager:
+            question = result.get("question", "")
+            messages = result.get("messages", [])
+            context = result.get("context", "")
+            needs_retrieval = result.get("needs_retrieval", False)
+            
+            # Extract conversation context
+            conversation_context = extract_conversation_context(messages, max_messages=6)
+            
+            # 1. Classification prompt
+            system_msg, human_msg = prompt_manager.get_classification_prompts(
+                context=conversation_context,
+                question=question
+            )
+            debug_info["classification_prompt"] = f"SYSTEM:\n{system_msg}\n\nHUMAN:\n{human_msg}"
+            
+            # 2. Rewrite prompt (only if retrieval was needed)
+            if needs_retrieval:
+                conversation_context_rewrite = extract_conversation_context(messages, max_messages=8)
+                system_msg, human_msg = prompt_manager.get_rewrite_prompts(
+                    context=conversation_context_rewrite,
+                    question=question
+                )
+                debug_info["rewrite_prompt"] = f"SYSTEM:\n{system_msg}\n\nHUMAN:\n{human_msg}"
+            else:
+                debug_info["rewrite_prompt"] = "N/A (no retrieval needed)"
+            
+            # 3. Generation prompt
+            conversation_context_gen = extract_conversation_context(messages, max_messages=10)
+            if needs_retrieval and context:
+                system_msg, human_msg = prompt_manager.get_generation_prompts(
+                    mode="retrieval_based",
+                    context=context,
+                    conversation_context=conversation_context_gen,
+                    question=question
+                )
+            else:
+                system_msg, human_msg = prompt_manager.get_generation_prompts(
+                    mode="direct_answer",
+                    conversation_context=conversation_context_gen,
+                    question=question
+                )
+            debug_info["generation_prompt"] = f"SYSTEM:\n{system_msg}\n\nHUMAN:\n{human_msg}"
+        
+    except Exception as e:
+        logger.warning(f"Debug info extraction failed: {e}")
+        # Fallback to normal execution
+        result = workflow.invoke(initial_state)
+    
+    return {
+        "result": result,
+        "debug": debug_info
+    }
 
 
 def load_golden_dataset(path: str) -> List[Dict]:
@@ -269,15 +454,33 @@ def run_evaluation(args):
     # Get configurations
     ingestion_config = get_config()
     provider = os.getenv("LLM_PROVIDER", "openai").lower()
-    model = os.getenv("MODEL", "gpt-4o-mini")
+    
+    # Get the appropriate model based on provider
+    if provider == "vllm":
+        model = os.getenv("VLLM_MODEL", os.getenv("MODEL", "gpt-4o-mini"))
+    else:
+        model = os.getenv("MODEL", "gpt-4o-mini")
     
     logger.info("=" * 80)
     logger.info("RAG EVALUATION FRAMEWORK - INFERENCE STAGE")
     logger.info("=" * 80)
-    logger.info(f"LLM Provider: {provider}, Model: {model}")
-    logger.info(f"Embedding: {ingestion_config.embedding_provider} - {ingestion_config.get_embedding_model()}")
+    logger.info("")
+    logger.info("📊 Configuration:")
+    logger.info("-" * 80)
+    logger.info(f"LLM Provider: {provider}")
+    logger.info(f"LLM Model: {model}")
+    logger.info("")
+    logger.info(f"🔢 Embedder Provider: {ingestion_config.embedding_provider}")
+    logger.info(f"🔢 Embedder Model: {ingestion_config.get_embedding_model()}")
+    logger.info(f"🔢 Embedding Dimension: {ingestion_config.get_embedding_dimension()}")
+    logger.info(f"🔢 Chunking Method: {ingestion_config.chunking_method}")
+    logger.info(f"🔢 Chunk Size: {args.chunk_size or ingestion_config.chunk_size}")
+    logger.info(f"🔢 Chunk Overlap: {args.chunk_overlap or ingestion_config.chunk_overlap}")
+    logger.info("")
     logger.info(f"Dataset: {args.dataset}")
     logger.info(f"Documents: {args.docs}")
+    logger.info(f"Top K Retrieval: {args.k}")
+    logger.info(f"Debug Mode: {args.log_debug_information}")
     logger.info("")
     
     # Create experiment folder
@@ -339,6 +542,9 @@ def run_evaluation(args):
     logger.info("Building RAG workflow...")
     rag_workflow = create_rag_workflow(llm, retriever, args.k)
     
+    # Create prompt manager for debug mode
+    prompt_manager = PromptManager() if args.log_debug_information else None
+    
     logger.info("")
     logger.info("=" * 80)
     logger.info("STARTING EVALUATION")
@@ -347,6 +553,8 @@ def run_evaluation(args):
     
     # Initialize CSV file
     csv_path = experiment_dir / "results.csv"
+    
+    # Base fieldnames
     csv_fieldnames = [
         "question", "llm_answer", "gold_answer", "context", "bucket", "difficulty",
         "timestamp", "latency_seconds", "retrieved_context", "num_chunks_retrieved",
@@ -354,13 +562,34 @@ def run_evaluation(args):
         "token_count_estimate", "cost_estimate"
     ]
     
+    # Add debug columns if debug mode is enabled
+    if args.log_debug_information:
+        debug_fieldnames = [
+            "debug_classification_latency",
+            "debug_rewrite_latency", 
+            "debug_retrieval_latency",
+            "debug_generation_latency",
+            "debug_retrieved_sources",
+            "debug_retrieved_doc_ids",
+            "debug_chunk_scores",
+            "debug_original_query_length",
+            "debug_rewritten_query_length",
+            "debug_context_length",
+            "debug_answer_length",
+            "debug_workflow_state",
+            "debug_classification_prompt",
+            "debug_rewrite_prompt",
+            "debug_generation_prompt"
+        ]
+        csv_fieldnames.extend(debug_fieldnames)
+    
     # Track metrics
     total_latency = 0
     total_cost = 0
     error_count = 0
     
     with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=csv_fieldnames)
+        writer = csv.DictWriter(csvfile, fieldnames=csv_fieldnames, quoting=csv.QUOTE_ALL)
         writer.writeheader()
         
         # Process each question
@@ -372,7 +601,7 @@ def run_evaluation(args):
                 bucket = item.get("bucket", "")
                 difficulty = item.get("difficulty", "")
                 
-                # Run RAG workflow
+                # Run RAG workflow with debug tracking
                 question_start = time.time()
                 
                 user_message = HumanMessage(content=question)
@@ -385,7 +614,16 @@ def run_evaluation(args):
                     "needs_retrieval": False
                 }
                 
-                result = rag_workflow.invoke(initial_state)
+                # Extract debug info and run workflow
+                workflow_output = extract_debug_information(
+                    rag_workflow, 
+                    initial_state, 
+                    args.log_debug_information,
+                    prompt_manager
+                )
+                result = workflow_output["result"]
+                debug_data = workflow_output["debug"]
+                
                 latency = time.time() - question_start
                 
                 # Extract metrics
@@ -405,20 +643,17 @@ def run_evaluation(args):
                 # Estimate cost
                 cost = estimate_cost(model, input_tokens, output_tokens)
                 
-                # Truncate retrieved context if too long for CSV (keep first 1000 chars)
-                retrieved_context_truncated = context[:1000] + "..." if len(context) > 1000 else context
-                
-                # Write row
+                # Build base row
                 row = {
                     "question": question,
                     "llm_answer": answer,
                     "gold_answer": gold_answer,
-                    "context": gt_context,  # Ground truth context from golden dataset
+                    "context": format_ground_truth_context(gt_context),  # Ground truth context from golden dataset (formatted)
                     "bucket": bucket,
                     "difficulty": difficulty,
                     "timestamp": datetime.now().isoformat(),
                     "latency_seconds": f"{latency:.3f}",
-                    "retrieved_context": retrieved_context_truncated,  # Actually retrieved context
+                    "retrieved_context": context,  # Actually retrieved context (full, not truncated)
                     "num_chunks_retrieved": num_chunks,
                     "needs_retrieval": needs_retrieval,
                     "rewritten_query": rewritten_query,
@@ -427,6 +662,27 @@ def run_evaluation(args):
                     "token_count_estimate": total_tokens,
                     "cost_estimate": f"{cost:.6f}"
                 }
+                
+                # Add debug columns if enabled
+                if args.log_debug_information:
+                    row.update({
+                        "debug_classification_latency": f"{debug_data.get('classification_latency', 0):.4f}",
+                        "debug_rewrite_latency": f"{debug_data.get('rewrite_latency', 0):.4f}",
+                        "debug_retrieval_latency": f"{debug_data.get('retrieval_latency', 0):.4f}",
+                        "debug_generation_latency": f"{debug_data.get('generation_latency', 0):.4f}",
+                        "debug_retrieved_sources": debug_data.get('retrieved_sources', ''),
+                        "debug_retrieved_doc_ids": debug_data.get('retrieved_doc_ids', ''),
+                        "debug_chunk_scores": debug_data.get('chunk_scores', ''),
+                        "debug_original_query_length": debug_data.get('original_query_length', 0),
+                        "debug_rewritten_query_length": debug_data.get('rewritten_query_length', 0),
+                        "debug_context_length": debug_data.get('context_length', 0),
+                        "debug_answer_length": debug_data.get('answer_length', 0),
+                        "debug_workflow_state": debug_data.get('workflow_state', ''),
+                        "debug_classification_prompt": debug_data.get('classification_prompt', ''),
+                        "debug_rewrite_prompt": debug_data.get('rewrite_prompt', ''),
+                        "debug_generation_prompt": debug_data.get('generation_prompt', '')
+                    })
+                
                 writer.writerow(row)
                 csvfile.flush()  # Ensure data is written incrementally
                 
@@ -442,7 +698,7 @@ def run_evaluation(args):
                     "question": item.get("question", ""),
                     "llm_answer": f"ERROR: {str(e)}",
                     "gold_answer": item.get("gold_answer", ""),
-                    "context": item.get("context", ""),  # GT context from golden dataset
+                    "context": format_ground_truth_context(item.get("context", "")),  # GT context from golden dataset (formatted)
                     "bucket": item.get("bucket", ""),
                     "difficulty": item.get("difficulty", ""),
                     "timestamp": datetime.now().isoformat(),
@@ -456,6 +712,27 @@ def run_evaluation(args):
                     "token_count_estimate": 0,
                     "cost_estimate": "0"
                 }
+                
+                # Add empty debug columns if enabled
+                if args.log_debug_information:
+                    row.update({
+                        "debug_classification_latency": "0",
+                        "debug_rewrite_latency": "0",
+                        "debug_retrieval_latency": "0",
+                        "debug_generation_latency": "0",
+                        "debug_retrieved_sources": "",
+                        "debug_retrieved_doc_ids": "",
+                        "debug_chunk_scores": "",
+                        "debug_original_query_length": 0,
+                        "debug_rewritten_query_length": 0,
+                        "debug_context_length": 0,
+                        "debug_answer_length": 0,
+                        "debug_workflow_state": "ERROR",
+                        "debug_classification_prompt": "",
+                        "debug_rewrite_prompt": "",
+                        "debug_generation_prompt": ""
+                    })
+                
                 writer.writerow(row)
                 csvfile.flush()
     
@@ -507,6 +784,7 @@ def run_evaluation(args):
         f.write(f"Top K: {args.k}\n")
         f.write(f"Tenant ID: {args.tenant_id}\n")
         f.write(f"Visibility: {args.visibility}\n")
+        f.write(f"Debug Mode: {args.log_debug_information}\n")
         f.write("\n")
         
         f.write("Git Versions\n")
@@ -601,6 +879,13 @@ def main():
         choices=["org", "private"],
         default="org",
         help="Document visibility scope (default: org)"
+    )
+    
+    # Debug configuration
+    parser.add_argument(
+        "--log-debug-information",
+        action="store_true",
+        help="Enable debug mode to log intermediate steps and add debug columns to CSV output"
     )
     
     args = parser.parse_args()

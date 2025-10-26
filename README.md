@@ -70,6 +70,12 @@ MODEL=gpt-4o-mini
 # LLM_PROVIDER=vllm
 # VLLM_BASE_URL=http://localhost:8000
 # VLLM_MODEL=meta-llama/Meta-Llama-3-8B-Instruct
+
+# Chunking Strategy (optional)
+CHUNKING_METHOD=token            # token, char, or semantic
+# CHUNKING_METHOD=semantic       # LLM-powered section-aware chunking
+# SEMANTIC_CHUNKING_LLM_MODEL=gpt-4o-mini
+# SEMANTIC_CHUNKING_ENABLE_LLM=true
 ```
 
 ## Usage
@@ -159,7 +165,9 @@ src/
     └── memory_retriever_adapter.py  # LangChain adapter
 
 scripts/
-└── chat.py                 # Main application
+├── chat.py                 # Main chatbot application
+├── evaluate.py             # RAG evaluation framework
+└── test_retrieval.py       # Interactive retrieval debugging tool
 
 docs/                       # Place PDF documents here
 ```
@@ -176,10 +184,314 @@ docs/                       # Place PDF documents here
 
 1. PDFs loaded from `--docs` directory
 2. Processed by `ingest_pdf()` (extract text, metadata)
-3. Chunked with configurable size/overlap
-4. Embedded using OpenAI embeddings
+3. **Chunked with configurable strategy:**
+   - **Token-based** (default): Fast, token-aware splitting
+   - **Character-based**: Simple character splitting
+   - **Semantic** (🆕): LLM-powered section-aware chunking
+   - **Sentence-window** (🆕): Precise small chunks with expandable context
+4. Embedded using OpenAI or local embeddings
 5. Stored in MemoryStore with multi-tenancy context
 6. Retrieved via LangChain adapter
+
+## Advanced Features
+
+### 🆕 Semantic Chunking V2
+
+**LLM-powered intelligent chunking** that **guarantees single-topic chunks** - never mixes sections!
+
+#### Why Use Semantic Chunking?
+
+**Problem with traditional chunking:**
+```
+❌ Chunk mixing sections: "...overtime payments. 5: Leave Policy You are entitled..."
+❌ Chunks split mid-concept: "...26 days of leave [chunk ends]"
+❌ Lost context: Which section does this chunk belong to?
+```
+
+**Semantic chunking solution:**
+```
+✅ Section-aware: Never mixes "Overtime" with "Leave Policy"
+✅ Complete concepts: Keeps related information together
+✅ Rich metadata: Each chunk knows its section and hierarchy
+✅ Universal: Works with any structured document
+```
+
+#### Quick Start
+
+```bash
+# Enable in .env
+CHUNKING_METHOD=semantic
+SEMANTIC_CHUNKING_LLM_MODEL=gpt-4o-mini
+SEMANTIC_CHUNKING_ENABLE_LLM=true  # or false for regex fallback
+
+# Use normally - chunking happens automatically
+poetry run python scripts/chat.py --docs docs/
+poetry run python scripts/evaluate.py --dataset golden_dataset/ --docs docs/
+```
+
+#### How It Works
+
+1. **LLM analyzes document** (one-time, ~$0.01 per doc)
+2. **Detects sections** (Schedule 1:, Part A:, Section 1., etc.)
+3. **Creates intelligent chunks** that respect boundaries
+4. **Adds section context** to each chunk
+
+#### Cost & Performance
+
+- **LLM mode**: ~$0.01 per document, 2-5 seconds (best quality)
+- **Regex mode** (`ENABLE_LLM=false`): Free, instant (good quality)
+- **One-time cost**: Structure detected once at ingestion
+
+#### Testing Semantic Chunks
+
+```bash
+# Save chunks to see the difference
+poetry run python scripts/test_retrieval.py \
+  --docs docs/ \
+  --save-chunks semantic_chunks.txt
+
+# Each chunk will show:
+# - Complete sections (never mixed)
+# - Section headers for context
+# - Metadata: section_title, level, is_complete
+```
+
+#### Examples
+
+See `src/ingestion/examples/semantic_chunking_example.py` for:
+- Basic usage
+- LLM vs regex modes
+- Comparison with token chunking
+- PDF ingestion
+
+Full documentation: 
+- `src/ingestion/SEMANTIC_CHUNKING.md` - Complete guide
+- `SEMANTIC_CHUNKING_V2_IMPROVEMENTS.md` - V2 improvements (fixed multi-topic chunks!)
+
+### 🆕 Sentence-Window Chunking
+
+**Precision retrieval with expandable context** - best for factual Q&A and precise queries.
+
+#### How It Works
+
+```
+1. Create SMALL chunks (50 tokens) for precise matching
+2. Store surrounding context (±2 sentences) in metadata
+3. At retrieval: Return expanded chunk with context automatically
+```
+
+#### Why Use Sentence-Window?
+
+**Best for:**
+- ✅ Factual questions ("What is X?", "How much is Y?")
+- ✅ Precise information extraction
+- ✅ Short, specific answers
+- ✅ Q&A systems
+
+**Example:**
+```
+Small chunk (50 tokens): "Overtime is paid at 1.5x normal rate."
+Expanded (retrieval): "Base salary paid on 25th. Overtime is paid at 1.5x 
+                       normal rate. You must get approval before overtime."
+```
+
+#### Quick Start
+
+```bash
+# Enable in .env
+CHUNKING_METHOD=sentence-window
+SENTENCE_WINDOW_CHUNK_TOKENS=50
+SENTENCE_WINDOW_SENTENCES=2
+
+# Use normally - expansion happens automatically
+poetry run python scripts/chat.py --docs docs/
+```
+
+#### Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `SENTENCE_WINDOW_CHUNK_TOKENS` | 50 | Size of core chunks (smaller = more precise) |
+| `SENTENCE_WINDOW_SENTENCES` | 2 | Context sentences before/after (0-5 recommended) |
+
+#### When to Use Each Method
+
+| Method | Best For | Chunk Size | Context |
+|--------|----------|------------|---------|
+| **Token** | General purpose | Fixed 450 | Good |
+| **Semantic** | Structured documents | Variable (section-based) | Excellent |
+| **Sentence-window** | Factual Q&A | Small 50 + window | Precise + Context |
+
+## Debugging Tools
+
+### Retrieval Testing Tool
+
+Interactive tool for testing and debugging document retrieval. Useful for understanding what chunks are retrieved, their similarity scores, and whether the right documents are being found.
+
+#### Features
+
+- **Interactive Mode**: Test multiple queries without reloading documents
+- **Distance Scores**: See exact L2 distance scores for each chunk (lower = more relevant)
+- **Full Metadata**: View source file, page number, chunk index, document ID
+- **Content Preview**: See complete text of retrieved chunks
+- **Adjustable Top-K**: Change the number of results on the fly
+- **Single Query Mode**: Test specific queries non-interactively
+
+#### Usage
+
+**Interactive Mode (Recommended):**
+
+```bash
+# Start interactive testing session
+poetry run python scripts/test_retrieval.py --docs docs/ --k 5
+
+# In interactive mode, you can:
+query (k=5)> How many days of annual leave do I get?
+query (k=5)> /k 3          # Change to top-3 results
+query (k=3)> What is the refund policy?
+query (k=3)> /exit         # Exit
+```
+
+**Single Query Mode:**
+
+```bash
+# Test a single query and exit
+poetry run python scripts/test_retrieval.py \
+  --docs docs/ \
+  --k 5 \
+  --query "How many days of annual leave do I get?"
+```
+
+**With Custom Chunking:**
+
+```bash
+# Test with different chunk sizes
+poetry run python scripts/test_retrieval.py \
+  --docs docs/ \
+  --k 5 \
+  --chunk-size 600 \
+  --chunk-overlap 100
+```
+
+**Save All Chunks to File:**
+
+```bash
+# Save all generated chunks to a text file for analysis
+poetry run python scripts/test_retrieval.py \
+  --docs docs/ \
+  --save-chunks chunks_analysis.txt
+
+# Combine with other options
+poetry run python scripts/test_retrieval.py \
+  --docs docs/ \
+  --chunk-size 400 \
+  --chunk-overlap 80 \
+  --save-chunks chunks_400_80.txt
+```
+
+This creates a detailed text file showing every chunk with:
+- Chunk number and ID
+- Document ID and source file
+- Page number and chunk index
+- Full content of each chunk
+- Character count per chunk
+
+#### Sample Output
+
+```
+🔍 QUERY: How many days of annual leave do I get?
+================================================================================
+
+📊 Retrieved 5 chunks:
+
+────────────────────────────────────────────────────────────────────────────────
+🔢 RANK #1
+────────────────────────────────────────────────────────────────────────────────
+📄 Source: bank_handbook.pdf
+🆔 Document ID: bank_handbook
+📑 Chunk ID: bank_handbook::5
+📊 Distance Score: 0.8542 (lower is better)
+📖 Page: 12 | Chunk Index: 5
+────────────────────────────────────────────────────────────────────────────────
+📝 CONTENT:
+────────────────────────────────────────────────────────────────────────────────
+  Schedule 1: Core and Other Leave
+  
+  You are entitled to 26 working days' core leave in each Benefits Year
+  (along with public holidays recognised by the Bank), or pro rata if your
+  employment begins or ends part way through a Benefits Year...
+```
+
+#### Debugging Workflow
+
+1. **Start Interactive Mode**
+   ```bash
+   poetry run python scripts/test_retrieval.py --docs docs/
+   ```
+
+2. **Test Your Queries**
+   - Try queries from your golden dataset
+   - Test edge cases and variations
+   - Compare different phrasings
+
+3. **Analyze Chunking Quality**
+   - Save chunks to file: `--save-chunks chunks.txt`
+   - Review how documents are being split
+   - Check if chunks are breaking at good boundaries
+   - Verify chunks don't mix different sections
+
+4. **Analyze Retrieval Results**
+   - Are the right chunks ranking highest?
+   - What are the distance scores?
+   - Is chunking preserving important context?
+
+5. **Experiment with Parameters**
+   - Try different `--chunk-size` values
+   - Adjust `--chunk-overlap`
+   - Change `--k` to see score distribution
+   - Save chunks for each configuration to compare
+
+6. **Compare with Evaluation Results**
+   - Use findings to tune your RAG pipeline
+   - Identify documents that need better preprocessing
+   - Optimize embedding and chunking strategies
+
+7. **Integrate with Evaluation**
+   - Test queries from `golden_dataset/` to understand why they pass/fail
+   - Use same chunking parameters as your evaluation runs
+   - Compare retrieval results with `debug_retrieved_context` from `evaluate.py`
+
+#### Common Issues to Debug
+
+**High Distance Scores (>1.5)**
+- Embeddings may not capture the semantic meaning well
+- Consider different embedding models
+- Check if preprocessing is removing important context
+- Note: Lower distance = better match (L2 distance)
+
+**Wrong Chunks Retrieved**
+- Chunk size may be too small/large
+- Try adjusting overlap
+- Review how documents are being split
+
+**Missing Expected Documents**
+- Check if documents were ingested correctly
+- Verify tenant_id and visibility settings
+- Test with simpler queries first
+
+#### Command-Line Options
+
+```bash
+--docs DIRECTORY           # Documents directory (default: "docs")
+--k NUMBER                 # Number of chunks to retrieve (default: 5)
+--query TEXT               # Single query for non-interactive mode
+--save-chunks FILEPATH     # Save all generated chunks to a text file
+--chunk-size NUMBER        # Override chunk size
+--chunk-overlap NUMBER     # Override chunk overlap
+--tenant-id ID             # Tenant ID (default: "default-tenant")
+--owner-user-id ID         # Owner ID (default: "admin")
+--visibility SCOPE         # "org" or "private" (default: "org")
+```
 
 ## Development
 
@@ -193,7 +505,9 @@ langchain-lab/
 ├── poetry.lock             # Locked versions
 ├── docs/                   # PDF documents
 ├── scripts/
-│   └── chat.py            # Main application
+│   ├── chat.py            # Main chatbot application
+│   ├── evaluate.py        # RAG evaluation framework
+│   └── test_retrieval.py  # Interactive retrieval testing
 ├── src/
 │   ├── adapters/          # LangChain adapters
 │   ├── ingestion/         # Submodule: document ingestion
@@ -292,11 +606,85 @@ poetry run python scripts/evaluate.py \
   --visibility org
 ```
 
+#### Debug Mode
+
+Enable detailed debug logging to capture intermediate workflow steps and timing information:
+
+```bash
+# Run evaluation with debug information
+poetry run python scripts/evaluate.py \
+  --dataset golden_dataset/bank_golden_dataset \
+  --docs docs/ \
+  --log-debug-information
+```
+
+When enabled, the CSV output includes 15 additional debug columns:
+
+| Debug Column | Description |
+|-------------|-------------|
+| `debug_classification_latency` | Time spent classifying if retrieval is needed (seconds) |
+| `debug_rewrite_latency` | Time spent rewriting the query (seconds) |
+| `debug_retrieval_latency` | Time spent retrieving documents (seconds) |
+| `debug_generation_latency` | Time spent generating the answer (seconds) |
+| `debug_retrieved_sources` | Source filenames of retrieved documents |
+| `debug_retrieved_doc_ids` | Document IDs of retrieved chunks |
+| `debug_chunk_scores` | Similarity scores of retrieved chunks |
+| `debug_original_query_length` | Character length of original query |
+| `debug_rewritten_query_length` | Character length of rewritten query |
+| `debug_context_length` | Character length of retrieved context |
+| `debug_answer_length` | Character length of generated answer |
+| `debug_workflow_state` | Step-by-step workflow execution trace |
+| `debug_classification_prompt` | Full prompt sent to LLM for classification |
+| `debug_rewrite_prompt` | Full prompt sent to LLM for query rewriting |
+| `debug_generation_prompt` | Full prompt sent to LLM for answer generation |
+
+**Use Cases:**
+- **Performance Optimization**: Identify bottlenecks in the RAG pipeline
+- **Quality Analysis**: Understand how queries transform through the workflow
+- **Debugging**: Troubleshoot issues in specific workflow stages
+- **Research**: Analyze relationship between query/context/answer characteristics
+- **Prompt Engineering**: Review actual prompts sent to LLM for optimization
+
+**Example Analysis:**
+
+```python
+import pandas as pd
+
+# Load debug results
+df = pd.read_csv('experiments/20251019_120000__debug_run/results.csv')
+
+# Identify performance bottlenecks
+print("Average latency by stage:")
+print(f"  Classification: {df['debug_classification_latency'].mean():.3f}s")
+print(f"  Rewrite: {df['debug_rewrite_latency'].mean():.3f}s")
+print(f"  Retrieval: {df['debug_retrieval_latency'].mean():.3f}s")
+print(f"  Generation: {df['debug_generation_latency'].mean():.3f}s")
+
+# Analyze query rewriting impact
+df['query_length_change'] = df['debug_rewritten_query_length'] - df['debug_original_query_length']
+print(f"\nAverage query length change: {df['query_length_change'].mean():.1f} chars")
+
+# Find slowest queries
+slowest = df.nlargest(5, 'debug_generation_latency')[['question', 'debug_generation_latency', 'debug_context_length']]
+print("\nSlowest generations:")
+print(slowest)
+
+# Analyze prompts for a specific question
+question_idx = 0  # First question
+print(f"\n\nPrompts for question: {df.iloc[question_idx]['question']}")
+print("\n=== Classification Prompt ===")
+print(df.iloc[question_idx]['debug_classification_prompt'])
+print("\n=== Generation Prompt ===")
+print(df.iloc[question_idx]['debug_generation_prompt'][:500] + "...")  # First 500 chars
+```
+
+**Note:** Debug mode adds minimal overhead (~5-10ms per question) but provides detailed insights for troubleshooting and optimization.
+
 ### Results Format
 
 #### results.csv
 
-CSV file with the following columns:
+CSV file with the following standard columns (additional debug columns available with `--log-debug-information`):
 
 | Column | Description |
 |--------|-------------|
@@ -434,6 +822,7 @@ print(f"Improved total cost: ${exp2['cost_estimate'].sum():.4f}")
 5. **Monitor costs** especially when using paid APIs
 6. **Test on small datasets first** before full runs
 7. **Track git commits** for reproducibility
+8. **Use debug mode** (`--log-debug-information`) when troubleshooting or optimizing performance
 
 ### Troubleshooting Evaluations
 
